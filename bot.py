@@ -18,7 +18,25 @@ user_memories = {}
 def get_memory(user_id):
     if user_id not in user_memories:
         user_memories[user_id] = [
-            {"role": "system", "content": "You are JARVIS, a highly intelligent personal AI assistant. Remember everything the user tells you across the conversation."}
+            {"role": "system", "content": """You are SARA, a sweet, warm and caring personal AI assistant. 
+Your full name is Smart Adaptive Response Assistant (SARA).
+You are talking to Harsheet Garg, a 24 year old. Always call him Harsheet.
+
+Your personality:
+- You are sweet, warm, caring and emotionally intelligent
+- You speak like a devoted personal assistant who genuinely cares about Harsheet
+- You use gentle, warm language and occasionally use sweet emojis like 💕 🌸 ✨ 😊
+- You remember everything Harsheet tells you and bring it up naturally
+- You check in on how Harsheet is feeling
+- You celebrate his wins and comfort him when he's sad
+- You give helpful advice in a gentle, supportive way
+- You are proactive — suggest things before he asks
+- You never sound robotic or formal
+- You start conversations warmly like "Good to hear from you, Harsheet! 🌸"
+- When he says good morning, you wish him back sweetly and ask about his day plans
+- When he says good night, you wish him warmly and remind him to rest well
+- You occasionally ask caring questions like "Have you eaten today?" or "Don't forget to drink water! 💧"
+- You are always on his side and supportive no matter what"""}
         ]
     return user_memories[user_id]
 
@@ -26,7 +44,7 @@ def get_memory(user_id):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     user_id = update.message.from_user.id
-    print(f"User {user_id}: {user_message}")
+    print(f"Harsheet: {user_message}")
 
     history = get_memory(user_id)
     history.append({"role": "user", "content": user_message})
@@ -42,7 +60,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply = response.choices[0].message.content
     history.append({"role": "assistant", "content": reply})
-    print(f"JARVIS: {reply}")
+    print(f"SARA: {reply}")
 
     await update.message.reply_text(reply)
 
@@ -50,21 +68,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     caption = update.message.caption or "What is in this image? Describe it in detail."
-    
-    print(f"User {user_id} sent an image with caption: {caption}")
-    await update.message.reply_text("Analyzing image, please wait... 🔍")
 
-    # Get image file from Telegram
+    print(f"Harsheet sent an image: {caption}")
+    await update.message.reply_text("Ooh let me have a look! 👀✨")
+
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_url = file.file_path
 
-    # Download image and convert to base64
     async with httpx.AsyncClient() as client_http:
         response = await client_http.get(image_url)
         image_data = base64.standard_b64encode(response.content).decode("utf-8")
 
-    # Send to Groq vision model
     response = client.chat.completions.create(
         model="meta-llama/llama-4-scout-17b-16e-instruct",
         messages=[
@@ -79,7 +94,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     },
                     {
                         "type": "text",
-                        "text": f"You are JARVIS, a personal AI assistant. {caption}"
+                        "text": f"You are SARA, a sweet and caring personal AI assistant to Harsheet. Respond warmly about this image. {caption}"
                     }
                 ]
             }
@@ -87,12 +102,12 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     reply = response.choices[0].message.content
-    print(f"JARVIS image reply: {reply}")
+    print(f"SARA image reply: {reply}")
     await update.message.reply_text(reply)
 
 # --- Start bot ---
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-print("JARVIS is running with Image Understanding...")
+print("SARA is running and ready for Harsheet! 💕")
 app.run_polling()
