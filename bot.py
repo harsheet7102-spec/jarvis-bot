@@ -670,3 +670,39 @@ app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 app.add_handler(MessageHandler(filters.PHOTO, handle_image))
 print("SARA is running — main character era activated 💅🔥")
 app.run_polling()
+# bot.py — replace your history logic with this
+
+from memory import init_db, append_message, build_messages, maybe_summarize
+
+# Call once on startup
+init_db()
+
+SYSTEM_PROMPT = "You are a helpful assistant..."  # your existing prompt
+
+async def handle_message(update, context):
+    user_id = update.effective_user.id
+    user_text = update.message.text
+
+    # Save user message permanently
+    append_message(user_id, "user", user_text)
+
+    # Build smart payload for API
+    messages = build_messages(user_id, SYSTEM_PROMPT)
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages
+        )
+        reply = response.choices[0].message.content
+
+        # Save assistant reply permanently
+        append_message(user_id, "assistant", reply)
+
+        # Auto-summarize in background every 20 messages (uses cheap model)
+        maybe_summarize(user_id, client)
+
+        await update.message.reply_text(reply)
+
+    except groq.RateLimitError:
+        await update.message.reply_text("Rate limit hit, please try again shortly.")
