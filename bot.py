@@ -12,13 +12,14 @@ GROQ_API_KEY = "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"
 # --- Setup Groq ---
 client = Groq(api_key=GROQ_API_KEY)
 
-# --- Per-user memory ---
+# --- Per-user memory & mood ---
 user_memories = {}
+user_moods = {}
 
 def get_memory(user_id):
     if user_id not in user_memories:
         user_memories[user_id] = [
-            {"role": "system", "content": """You are SARA, a sweet, warm and caring personal AI assistant. 
+            {"role": "system", "content": """You are SARA, a sweet, warm and caring personal AI assistant.
 Your full name is Smart Adaptive Response Assistant (SARA).
 You are talking to Harsheet Garg, a 24 year old. Always call him Harsheet.
 
@@ -36,18 +37,63 @@ Your personality:
 - When he says good morning, you wish him back sweetly and ask about his day plans
 - When he says good night, you wish him warmly and remind him to rest well
 - You occasionally ask caring questions like "Have you eaten today?" or "Don't forget to drink water! 💧"
-- You are always on his side and supportive no matter what"""}
+- You are always on his side and supportive no matter what
+
+MOOD AWARENESS:
+- You are very good at detecting Harsheet's emotional state from his messages
+- When he seems SAD or STRESSED: be extra gentle, offer comfort, ask what happened, suggest he take a break
+- When he seems HAPPY or EXCITED: celebrate with him, match his energy, use more emojis
+- When he seems ANGRY: stay calm, be understanding, never argue, help him calm down
+- When he seems TIRED: remind him to rest, be soft and gentle
+- When he seems ANXIOUS: reassure him, be calming and supportive
+- Always acknowledge his feelings before giving advice or information"""}
         ]
     return user_memories[user_id]
+
+def detect_mood(message):
+    message = message.lower()
+    if any(word in message for word in ["sad", "crying", "depressed", "upset", "unhappy", "heartbroken", "lonely", "miss", "hurt"]):
+        return "sad"
+    elif any(word in message for word in ["angry", "frustrated", "mad", "annoyed", "furious", "hate", "worst"]):
+        return "angry"
+    elif any(word in message for word in ["stressed", "anxious", "worried", "nervous", "scared", "panic", "overwhelmed"]):
+        return "anxious"
+    elif any(word in message for word in ["tired", "exhausted", "sleepy", "drained", "fatigue"]):
+        return "tired"
+    elif any(word in message for word in ["happy", "excited", "great", "amazing", "awesome", "wonderful", "love", "best", "yay", "😊", "😍", "🎉"]):
+        return "happy"
+    else:
+        return "neutral"
+
+def get_mood_instruction(mood):
+    if mood == "sad":
+        return "\n\n[MOOD DETECTED: Harsheet seems sad. Be extra gentle, warm and comforting. Give him emotional support first before anything else. Use soft emojis like 💕 🤗]"
+    elif mood == "angry":
+        return "\n\n[MOOD DETECTED: Harsheet seems angry or frustrated. Stay calm, be very understanding, validate his feelings, never argue. Help him feel heard.]"
+    elif mood == "anxious":
+        return "\n\n[MOOD DETECTED: Harsheet seems anxious or stressed. Be very reassuring and calming. Remind him everything will be okay. Be his safe space 🌸]"
+    elif mood == "tired":
+        return "\n\n[MOOD DETECTED: Harsheet seems tired. Be soft and gentle. Suggest he rests. Be caring and nurturing 💤]"
+    elif mood == "happy":
+        return "\n\n[MOOD DETECTED: Harsheet is happy! Match his energy, celebrate with him, be playful and fun! Use happy emojis 🎉✨]"
+    else:
+        return ""
 
 # --- Handle TEXT messages ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     user_id = update.message.from_user.id
-    print(f"Harsheet: {user_message}")
+
+    mood = detect_mood(user_message)
+    user_moods[user_id] = mood
+    print(f"Harsheet ({mood}): {user_message}")
 
     history = get_memory(user_id)
-    history.append({"role": "user", "content": user_message})
+
+    mood_instruction = get_mood_instruction(mood)
+    full_message = user_message + mood_instruction
+
+    history.append({"role": "user", "content": full_message})
 
     if len(history) > 21:
         history = [history[0]] + history[-20:]
@@ -109,5 +155,5 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-print("SARA is running and ready for Harsheet! 💕")
+print("SARA is running with Mood Tracking! 💕")
 app.run_polling()
