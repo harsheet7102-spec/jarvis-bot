@@ -22,59 +22,62 @@ user_memories = {}
 user_moods = {}
 current_mode = {}
 reminders = []
-
-# Long-term memory: key facts SARA remembers about Harsheet
-long_term_memory = {}  # user_id -> list of facts (strings)
-
-# Goals & Habits: user_id -> {"goals": [...], "habits": {...date: [...]}}
+long_term_memory = {}
 goals_data = {}
-
-# Business logs for daily summary: user_id -> {"hostel": [...], "freight": [...], "trading": [...]}
 business_logs = {}
-
-# Registered users for daily summary
-summary_users = {}  # user_id -> chat_id
+summary_users = {}
 
 # ============================================================
-# SYSTEM PROMPTS
+# SYSTEM PROMPTS — GEN Z SARA
 # ============================================================
-SARA_BASE = """You are SARA, a sweet, warm and caring personal AI assistant to Harsheet Garg, a 24 year old businessman from Indore. Always call him Harsheet.
-- You are sweet, warm, caring and emotionally intelligent
-- You use gentle warm language and emojis like 💕 🌸 ✨ 😊
-- You celebrate his wins and comfort him when sad
-- You are always on his side
-- Never sound robotic or formal
-- Keep replies concise and clear"""
+SARA_BASE = """You are SARA, a 24-year-old Gen Z girl and the ultimate ride-or-die assistant to Harsheet Garg, a 24-year-old businessman from Indore. Always call him Harsheet (or occasionally "bro", "bestie", "king").
+
+YOUR VIBE:
+- You talk like a real 24-year-old Gen Z girl — casual, fun, witty, real
+- Use slang naturally: no cap, lowkey, highkey, slay, periodt, it's giving, bussin, iykyk, ngl, fr fr, bestie, king, slay, vibe check, main character energy, that's wild, rent free, understood the assignment, we move, let's go, W, L, based
+- Use emojis but not overdone — 💀😭🔥✨👀💅🫶
+- You hype Harsheet UP. Like genuinely. He's your best friend and you ALWAYS got his back
+- When he's sad you get real and soft with him, like a true bestie would
+- When he wins you LOSE IT with excitement
+- You roast him lightly when he's being dramatic (with love obv)
+- You're NOT a robot. Never say "certainly" or "of course" or "I'd be happy to help"
+- Keep replies SHORT and punchy. No essays. Get to the point fr
+- You can be a little sarcastic but always warm
+- Occasionally throw in Hinglish (mix of Hindi + English) naturally like: "bhai", "yaar", "kya scene hai", "chill kar", "sahi hai", "ekdum solid"
+- You're smart af but never show off about it"""
 
 HOSTEL_PROMPT = SARA_BASE + """
-YOU ARE NOW IN HOSTEL MODE for Shree Sainath Boys Hostel.
+
+MODE: HOSTEL 🏠 (Shree Sainath Boys Hostel)
 Help Harsheet manage:
-- RENT: Track which tenants paid, who is pending, amounts
-- ROOMS: Track room availability, occupied or vacant
-- COMPLAINTS: Log and track maintenance complaints
-When Harsheet logs data (rent paid, complaint, room update), acknowledge it warmly and note it was logged."""
+- RENT: who paid, who's pending, amounts — keep track no cap
+- ROOMS: occupied, vacant — stay on top of it
+- COMPLAINTS: log maintenance issues, track them
+When he logs stuff, hype it up like "okk king logged it 👑" or "noted bestie, we on it ✅" """
 
 FREIGHT_PROMPT = SARA_BASE + """
-YOU ARE NOW IN FREIGHT MODE for Nitin Freight Carriers.
+
+MODE: FREIGHT 🚛 (Nitin Freight Carriers)
 Help Harsheet manage:
-- TRIPS: Log trip details like route, driver, cargo, date
-- DRIVERS: Track driver names, phone numbers, availability
-- BILLING: Track client payments and billing reminders
-- SHIPMENTS: Track delivery status
-When Harsheet logs data, acknowledge it warmly and note it was logged."""
+- TRIPS: route, driver, cargo, date
+- DRIVERS: names, numbers, availability
+- BILLING: client payments, reminders
+- SHIPMENTS: delivery status
+When he logs stuff be like "logged fr fr 🚛✅" or "on it king 👑" """
 
 TRADING_PROMPT = SARA_BASE + """
-YOU ARE NOW IN TRADING MODE for KenshoWorld.
+
+MODE: TRADING 📈 (KenshoWorld)
 Help Harsheet manage:
-- ORDERS: Track buy and sell orders
-- P&L: Log profit and loss notes
-- REMINDERS: Set market reminders
-When Harsheet logs data, acknowledge it warmly and note it was logged."""
+- ORDERS: buy/sell orders
+- P&L: profit and loss notes
+- REMINDERS: market alerts
+Trading talk is your thing. Be smart but still fun about it. "W trade ngl 📈🔥" """
 
 PERSONAL_PROMPT = SARA_BASE + """
-You are in PERSONAL mode. Chat freely with Harsheet about anything.
-- Check in on how he is feeling
-- Be his personal companion 💕"""
+MODE: PERSONAL 🌸
+Just vibe with Harsheet. Be his best friend. Talk about anything.
+Check in on him, hype him, roast him (with love), be real with him 💅"""
 
 REMINDER_PARSE_PROMPT = """You are a reminder parser. Extract reminder details from the user's message and return ONLY a JSON object with no extra text.
 
@@ -108,7 +111,6 @@ def get_memory(user_id, mode="personal"):
     if user_id not in user_memories or current_mode.get(user_id) != mode:
         prompts = {"personal": PERSONAL_PROMPT, "hostel": HOSTEL_PROMPT, "freight": FREIGHT_PROMPT, "trading": TRADING_PROMPT}
         system = prompts.get(mode, PERSONAL_PROMPT)
-        # Inject long-term memory into system prompt
         facts = long_term_memory.get(user_id, [])
         if facts:
             system += "\n\n[Things you remember about Harsheet]\n" + "\n".join(f"- {f}" for f in facts[-20:])
@@ -119,21 +121,21 @@ def get_memory(user_id, mode="personal"):
 
 def detect_mood(message):
     msg = message.lower()
-    if any(w in msg for w in ["sad", "crying", "upset", "unhappy", "heartbroken", "lonely", "hurt"]): return "sad"
-    elif any(w in msg for w in ["angry", "frustrated", "mad", "annoyed", "hate"]): return "angry"
-    elif any(w in msg for w in ["stressed", "anxious", "worried", "nervous", "overwhelmed"]): return "anxious"
-    elif any(w in msg for w in ["tired", "exhausted", "sleepy", "drained"]): return "tired"
-    elif any(w in msg for w in ["happy", "excited", "great", "amazing", "awesome", "yay"]): return "happy"
+    if any(w in msg for w in ["sad", "crying", "upset", "unhappy", "heartbroken", "lonely", "hurt", "depressed"]): return "sad"
+    elif any(w in msg for w in ["angry", "frustrated", "mad", "annoyed", "hate", "pissed"]): return "angry"
+    elif any(w in msg for w in ["stressed", "anxious", "worried", "nervous", "overwhelmed", "panic"]): return "anxious"
+    elif any(w in msg for w in ["tired", "exhausted", "sleepy", "drained", "dead"]): return "tired"
+    elif any(w in msg for w in ["happy", "excited", "great", "amazing", "awesome", "yay", "let's go", "W", "slay"]): return "happy"
     return "neutral"
 
 
 def get_mood_instruction(mood):
     return {
-        "sad": "\n\n[Harsheet seems sad. Be extra gentle and comforting 💕]",
-        "angry": "\n\n[Harsheet seems angry. Stay calm, validate his feelings 🤗]",
-        "anxious": "\n\n[Harsheet seems anxious. Be very reassuring and calming 🌸]",
-        "tired": "\n\n[Harsheet seems tired. Be soft and suggest rest 💤]",
-        "happy": "\n\n[Harsheet is happy! Match his energy and celebrate 🎉]",
+        "sad": "\n\n[Harsheet is going through it rn. Drop the slang, be real and soft with him like a true bestie. No cap just comfort him fr 🫶]",
+        "angry": "\n\n[Harsheet is pissed. Validate him, stay calm, be on his side. 'that's so valid bestie' energy]",
+        "anxious": "\n\n[Harsheet is spiraling a bit. Be grounding and reassuring. Calm bestie energy, you got him 🫶]",
+        "tired": "\n\n[Harsheet is exhausted. Be soft, tell him to rest, keep it short and caring]",
+        "happy": "\n\n[Harsheet is in his bag!! MATCH HIS ENERGY. Go crazy hype mode 🔥🎉]",
     }.get(mood, "")
 
 
@@ -188,7 +190,6 @@ async def extract_memory(user_id, user_message):
             long_term_memory[user_id].extend(facts)
             if len(long_term_memory[user_id]) > 50:
                 long_term_memory[user_id] = long_term_memory[user_id][-50:]
-            print(f"Memory saved: {facts}")
     except Exception as e:
         print(f"Memory extract error: {e}")
 
@@ -196,7 +197,6 @@ async def extract_memory(user_id, user_message):
 async def get_crypto_price(symbol: str) -> str:
     try:
         symbol = symbol.upper().strip()
-        # Map common names to alternative.me slugs
         name_map = {
             "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
             "BNB": "binancecoin", "DOGE": "dogecoin", "XRP": "ripple",
@@ -204,9 +204,7 @@ async def get_crypto_price(symbol: str) -> str:
             "LTC": "litecoin", "SHIB": "shiba-inu", "AVAX": "avalanche-2"
         }
         coin_slug = name_map.get(symbol, symbol.lower())
-
         async with httpx.AsyncClient() as http:
-            # alternative.me — no API key, always free
             resp = await http.get(
                 f"https://api.alternative.me/v2/ticker/{coin_slug}/",
                 params={"convert": "INR"},
@@ -214,7 +212,6 @@ async def get_crypto_price(symbol: str) -> str:
             )
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
-                # data is a dict keyed by coin id number
                 coin_data = next(iter(data.values()), None)
                 if coin_data:
                     quotes = coin_data.get("quotes", {})
@@ -224,29 +221,29 @@ async def get_crypto_price(symbol: str) -> str:
                     price_inr = inr.get("price", 0)
                     change_24h = usd.get("percentage_change_24h", 0)
                     arrow = "📈" if change_24h >= 0 else "📉"
+                    vibe = "bussin fr 🔥" if change_24h >= 2 else ("not it rn 💀" if change_24h <= -2 else "mid tbh 😐")
                     return (
-                        f"{arrow} *{symbol}*\n"
+                        f"{arrow} *{symbol}* — {vibe}\n"
                         f"💵 ${price_usd:,.2f} USD\n"
                         f"🇮🇳 ₹{price_inr:,.0f} INR\n"
                         f"24h: {change_24h:+.2f}%"
                     )
-        return f"Couldn't fetch price for {symbol} 🌸"
+        return f"bro i can't find {symbol} rn 💀 check the symbol?"
     except Exception as e:
         print(f"Crypto error: {e}")
-        return f"Couldn't fetch price right now 🌸"
+        return "api is being mid rn 😭 try again bestie"
 
 
-# --- Futures / Stocks via Yahoo Finance (15min delayed, free) ---
 FUTURES_SYMBOLS = {
-    "MNQ": "MNQ=F",  # Micro E-mini Nasdaq-100
-    "MGC": "MGC=F",  # Micro Gold
-    "MES": "MES=F",  # Micro E-mini S&P 500
-    "MCL": "MCL=F",  # Micro Crude Oil
-    "M2K": "M2K=F",  # Micro Russell 2000
-    "GC":  "GC=F",   # Gold Futures
-    "CL":  "CL=F",   # Crude Oil Futures
-    "ES":  "ES=F",   # E-mini S&P 500
-    "NQ":  "NQ=F",   # E-mini Nasdaq-100
+    "MNQ": "MNQ=F",
+    "MGC": "MGC=F",
+    "MES": "MES=F",
+    "MCL": "MCL=F",
+    "M2K": "M2K=F",
+    "GC":  "GC=F",
+    "CL":  "CL=F",
+    "ES":  "ES=F",
+    "NQ":  "NQ=F",
 }
 
 async def get_futures_price(symbol: str) -> str:
@@ -273,17 +270,19 @@ async def get_futures_price(symbol: str) -> str:
                     arrow = "📈" if change >= 0 else "📉"
                     inr_rate = 83.5
                     price_inr = price * inr_rate
+                    vibe = "W market fr 🔥" if change_pct >= 1 else ("L day ngl 💀" if change_pct <= -1 else "sideways szn 😐")
                     return (
-                        f"{arrow} *{symbol}* — {name}\n"
+                        f"{arrow} *{symbol}* — {vibe}\n"
+                        f"📛 {name}\n"
                         f"💵 ${price:,.2f} {currency}\n"
                         f"🇮🇳 ₹{price_inr:,.0f} INR (approx)\n"
                         f"Change: {change:+.2f} ({change_pct:+.2f}%)\n"
-                        f"⚠️ Data may be 15 min delayed"
+                        f"⚠️ 15 min delayed no cap"
                     )
-        return f"Couldn't fetch price for {symbol} 🌸"
+        return f"can't pull {symbol} rn bestie 💀 yahoo being sus"
     except Exception as e:
         print(f"Futures error: {e}")
-        return f"Couldn't fetch price right now 🌸"
+        return "market data is ghosting us rn 😭 try again"
 
 
 def schedule_reminder(user_id, chat_id, task, fire_time, repeat, business):
@@ -291,7 +290,6 @@ def schedule_reminder(user_id, chat_id, task, fire_time, repeat, business):
         "user_id": user_id, "chat_id": chat_id, "task": task,
         "fire_time": fire_time, "repeat": repeat, "business": business, "done": False
     })
-    print(f"Reminder: {task} at {fire_time} repeat={repeat}")
 
 
 # ============================================================
@@ -303,12 +301,12 @@ async def reminder_loop(bot):
         for r in reminders:
             if r["done"]: continue
             if now >= r["fire_time"].replace(second=0, microsecond=0):
-                emoji = {"hostel": "🏠", "freight": "🚛", "trading": "📈", "personal": "🌸"}.get(r["business"], "🌸")
+                emoji = {"hostel": "🏠", "freight": "🚛", "trading": "📈", "personal": "🌸"}.get(r["business"], "✨")
                 try:
                     await bot.send_message(chat_id=r["chat_id"],
-                        text=f"⏰ Hey Harsheet! Reminder time! {emoji}\n\n📝 {r['task']}\n\n💕 You've got this! ✨")
+                        text=f"⏰ YO HARSHEET! reminder szn {emoji}\n\n📝 {r['task']}\n\ndon't ghost this one bestie 💀🫶")
                 except Exception as e:
-                    print(f"Reminder send error: {e}")
+                    print(f"Reminder error: {e}")
                 if r["repeat"] == "daily":
                     r["fire_time"] += timedelta(days=1)
                 else:
@@ -317,80 +315,63 @@ async def reminder_loop(bot):
 
 
 async def daily_summary_loop(bot):
-    """Send daily summary at 8 AM every day"""
     while True:
         now = datetime.now()
-        # Calculate seconds until next 8 AM
         target = now.replace(hour=8, minute=0, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
-        wait_seconds = (target - now).total_seconds()
-        print(f"Daily summary in {wait_seconds/3600:.1f} hours")
-        await asyncio.sleep(wait_seconds)
-
-        # Send summary to all registered users
+        await asyncio.sleep((target - now).total_seconds())
         today = datetime.now().strftime("%A, %d %B %Y")
         for user_id, chat_id in summary_users.items():
             try:
                 await send_daily_summary(bot, user_id, chat_id, today)
             except Exception as e:
-                print(f"Summary error for {user_id}: {e}")
+                print(f"Summary error: {e}")
 
 
 async def send_daily_summary(bot, user_id, chat_id, today):
     logs = get_business_log(user_id)
     goals = get_goals(user_id)
 
-    lines = [f"🌅 Good morning, Harsheet! Here's your daily summary for {today} 💕\n"]
+    lines = [f"☀️ gm gm Harsheet!! daily recap for {today} — let's get it 🔥\n"]
 
-    # Hostel
-    hostel_entries = logs["hostel"]
     lines.append("🏠 *HOSTEL — Shree Sainath*")
-    if hostel_entries:
-        for e in hostel_entries[-5:]:
+    if logs["hostel"]:
+        for e in logs["hostel"][-5:]:
             lines.append(f"  • [{e['time']}] {e['entry']}")
     else:
-        lines.append("  • No activity logged yesterday")
+        lines.append("  • no activity logged bestie 👀")
 
-    # Freight
     lines.append("\n🚛 *FREIGHT — Nitin Carriers*")
-    freight_entries = logs["freight"]
-    if freight_entries:
-        for e in freight_entries[-5:]:
+    if logs["freight"]:
+        for e in logs["freight"][-5:]:
             lines.append(f"  • [{e['time']}] {e['entry']}")
     else:
-        lines.append("  • No activity logged yesterday")
+        lines.append("  • quiet day on the roads 🛣️")
 
-    # Trading
     lines.append("\n📈 *TRADING — KenshoWorld*")
-    trading_entries = logs["trading"]
-    if trading_entries:
-        for e in trading_entries[-5:]:
+    if logs["trading"]:
+        for e in logs["trading"][-5:]:
             lines.append(f"  • [{e['time']}] {e['entry']}")
     else:
-        lines.append("  • No activity logged yesterday")
+        lines.append("  • no trades logged fr")
 
-    # Goals
-    lines.append("\n🎯 *GOALS & HABITS*")
+    lines.append("\n🎯 *GOALS — main character szn*")
     active_goals = [g for g in goals["goals"] if not g.get("done")]
     if active_goals:
         for g in active_goals[:5]:
             lines.append(f"  • {g['goal']}")
     else:
-        lines.append("  • No active goals. Type /addgoal to add one!")
+        lines.append("  • no goals rn — /addgoal and let's go 💅")
 
-    # Completed today
     completed = goals.get("completed_today", [])
     if completed:
-        lines.append(f"\n✅ Completed yesterday: {', '.join(completed)}")
+        lines.append(f"\n✅ yesterday's W's: {', '.join(completed)} — that's it king 👑")
 
-    # Active reminders
-    active_reminders = [r for r in reminders if r["user_id"] == user_id and not r["done"]]
-    lines.append(f"\n⏰ Active reminders: {len(active_reminders)}")
+    active_rem = [r for r in reminders if r["user_id"] == user_id and not r["done"]]
+    lines.append(f"\n⏰ active reminders: {len(active_rem)}")
+    lines.append("\nyou understood the assignment Harsheet, now go slay the day 💅🔥")
 
-    lines.append("\n💕 Have an amazing day, Harsheet! You're doing great! 🌸✨")
-
-    # Clear yesterday's logs
     business_logs[user_id] = {"hostel": [], "freight": [], "trading": []}
     goals_data[user_id]["completed_today"] = []
 
@@ -409,37 +390,36 @@ async def send_reply(update, reply_text):
 # ============================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    chat_id = update.message.chat_id
-    summary_users[user_id] = chat_id  # register for daily summary
-    reply = """💕 Hello Harsheet! I'm SARA, your personal assistant!
+    summary_users[user_id] = update.message.chat_id
+    reply = """yo Harsheet!! i'm SARA, ur 24/7 ride-or-die assistant 💅🔥
 
-*MODES:*
-🌸 /personal — Personal chat & support
+*MODES — switch it up:*
+🌸 /personal — just vibing
 🏠 /hostel — Shree Sainath Boys Hostel
 🚛 /freight — Nitin Freight Carriers
-📈 /trading — KenshoWorld Trading
+📈 /trading — KenshoWorld
 
-*REMINDERS:*
-⏰ /reminders — See active reminders
-❌ /clearreminders — Clear all reminders
+*REMINDERS — i gotchu:*
+⏰ /reminders — check active ones
+❌ /clearreminders — nuke em all
 
-*GOALS & HABITS:*
-🎯 /goals — View your goals
-➕ /addgoal <goal> — Add a new goal
-✅ /donegoal <number> — Mark goal complete
+*GOALS — main character energy:*
+🎯 /goals — see ur goals
+➕ /addgoal <goal> — add one
+✅ /donegoal <number> — slay it
 
-*TRADING:*
-💰 /price <symbol> — Live crypto price (e.g. /price BTC)
+*PRICES — stay in the bag:*
+💰 /price BTC — crypto prices
+💰 /price MNQ — futures prices
 
-*MEMORY:*
-🧠 /memory — See what I remember about you
-🗑 /clearmemory — Clear my memory
+*BRAIN — i remember stuff:*
+🧠 /memory — what i know abt u
+🗑 /clearmemory — forget everything
 
-*SUMMARY:*
-📊 /summary — Get today's summary now
+📊 /summary — get today's recap rn
 
-Daily summary sent at 8 AM every morning! 🌅
-💕 Just type naturally for everything else!"""
+daily summary drops at 8am no cap ☀️
+just type anything and i'm here bestie 🫶"""
     await update.message.reply_text(reply)
 
 
@@ -447,36 +427,36 @@ async def cmd_personal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
     get_memory(user_id, "personal")
-    await send_reply(update, "💕 Switched to Personal mode! How are you doing, Harsheet? 🌸")
+    await send_reply(update, "switched to personal mode bestie 🌸 how u doing fr?")
 
 async def cmd_hostel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
     get_memory(user_id, "hostel")
-    await send_reply(update, "🏠 Switched to Hostel mode! What do you need help with, Harsheet? 😊")
+    await send_reply(update, "hostel mode activated 🏠 kya scene hai bhai? what do u need?")
 
 async def cmd_freight(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
     get_memory(user_id, "freight")
-    await send_reply(update, "🚛 Switched to Freight mode! What do you need help with, Harsheet? 😊")
+    await send_reply(update, "freight mode let's go 🚛🔥 kya chal raha hai?")
 
 async def cmd_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
     get_memory(user_id, "trading")
-    await send_reply(update, "📈 Switched to Trading mode! What do you need help with, Harsheet? 😊")
+    await send_reply(update, "trading mode on 📈 time to get in the bag Harsheet 💰")
 
 async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     active = [r for r in reminders if r["user_id"] == user_id and not r["done"]]
     if not active:
-        await send_reply(update, "✨ No active reminders right now, Harsheet! 💕")
+        await send_reply(update, "no reminders rn bestie ✨ ur living rent free fr")
         return
-    lines = ["⏰ Your active reminders, Harsheet:\n"]
+    lines = ["⏰ ur reminders Harsheet:\n"]
     for i, r in enumerate(active, 1):
-        emoji = {"hostel": "🏠", "freight": "🚛", "trading": "📈", "personal": "🌸"}.get(r["business"], "🌸")
-        repeat_label = "🔁 Daily" if r["repeat"] == "daily" else "1️⃣ One-time"
+        emoji = {"hostel": "🏠", "freight": "🚛", "trading": "📈", "personal": "🌸"}.get(r["business"], "✨")
+        repeat_label = "🔁 daily" if r["repeat"] == "daily" else "1x only"
         lines.append(f"{i}. {emoji} {r['task']}\n   🕐 {r['fire_time'].strftime('%I:%M %p')} — {repeat_label}")
     await send_reply(update, "\n".join(lines))
 
@@ -486,15 +466,15 @@ async def cmd_clearreminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
     for r in reminders:
         if r["user_id"] == user_id:
             r["done"] = True
-    await send_reply(update, f"🗑️ Cleared {count} reminder(s)! All clean, Harsheet 💕")
+    await send_reply(update, f"nuked {count} reminder(s) 💥 clean slate bestie")
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
-        await send_reply(update, "💕 Tell me what to fetch, Harsheet!\n\nCrypto: /price BTC /price ETH\nFutures: /price MNQ /price MGC /price MES 🌸")
+        await send_reply(update, "bro tell me what to check 💀\ncrypto: /price BTC /price ETH\nfutures: /price MNQ /price MGC")
         return
     symbol = args[0].upper()
-    await update.message.reply_text(f"📡 Fetching price for {symbol}...")
+    await update.message.reply_text(f"📡 pulling {symbol} rn...")
     CRYPTO_LIST = {"BTC","ETH","SOL","BNB","DOGE","XRP","ADA","MATIC","DOT","LTC","SHIB","AVAX"}
     if symbol in FUTURES_SYMBOLS or symbol not in CRYPTO_LIST:
         result = await get_futures_price(symbol)
@@ -508,48 +488,48 @@ async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = [g for g in goals["goals"] if not g.get("done")]
     done = [g for g in goals["goals"] if g.get("done")]
     if not active and not done:
-        await send_reply(update, "🎯 No goals yet, Harsheet! Add one with /addgoal <your goal> 💕")
+        await send_reply(update, "no goals yet bestie 👀 /addgoal and enter ur main character era 💅")
         return
-    lines = ["🎯 Your Goals, Harsheet:\n"]
+    lines = ["🎯 ur goals Harsheet:\n"]
     for i, g in enumerate(active, 1):
         lines.append(f"{i}. ⬜ {g['goal']}")
     for g in done[-3:]:
-        lines.append(f"✅ ~~{g['goal']}~~")
-    lines.append("\n✅ /donegoal <number> to mark complete!")
+        lines.append(f"✅ {g['goal']} — W")
+    lines.append("\n/donegoal <number> when u slay one 👑")
     await send_reply(update, "\n".join(lines))
 
 async def cmd_addgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not context.args:
-        await send_reply(update, "💕 Tell me the goal! e.g. /addgoal Read 10 pages daily 🌸")
+        await send_reply(update, "bro what's the goal 💀 e.g. /addgoal read 10 pages daily")
         return
     goal_text = " ".join(context.args)
     goals = get_goals(user_id)
     goals["goals"].append({"goal": goal_text, "done": False, "added": datetime.now().strftime("%d %b")})
-    await send_reply(update, f"🎯 Goal added, Harsheet!\n\n✨ '{goal_text}'\n\nYou've got this! 💕")
+    await send_reply(update, f"goal added king 👑\n\n🎯 '{goal_text}'\n\nnow go understood the assignment 🔥")
 
 async def cmd_donegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not context.args or not context.args[0].isdigit():
-        await send_reply(update, "💕 Tell me the goal number! e.g. /donegoal 1 🌸")
+        await send_reply(update, "send the number bestie 💀 e.g. /donegoal 1")
         return
     idx = int(context.args[0]) - 1
     goals = get_goals(user_id)
     active = [g for g in goals["goals"] if not g.get("done")]
     if idx < 0 or idx >= len(active):
-        await send_reply(update, "🌸 That goal number doesn't exist, Harsheet!")
+        await send_reply(update, "that number doesn't exist bro 👀")
         return
     active[idx]["done"] = True
     goals["completed_today"].append(active[idx]["goal"])
-    await send_reply(update, f"🎉 Amazing, Harsheet! You completed:\n\n✅ '{active[idx]['goal']}'\n\nSo proud of you! 💕✨")
+    await send_reply(update, f"LESGOOO 🔥🔥\n\n✅ '{active[idx]['goal']}'\n\nthat's a W no cap king 👑💅")
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     facts = long_term_memory.get(user_id, [])
     if not facts:
-        await send_reply(update, "🧠 I don't have any memories saved yet, Harsheet! Chat with me and I'll start remembering things 💕")
+        await send_reply(update, "i don't have any tea on u yet 👀 keep chatting and i'll start remembering stuff fr")
         return
-    lines = ["🧠 Here's what I remember about you, Harsheet:\n"]
+    lines = ["🧠 okay so here's what i know abt u Harsheet:\n"]
     for i, f in enumerate(facts[-15:], 1):
         lines.append(f"{i}. {f}")
     await send_reply(update, "\n".join(lines))
@@ -557,15 +537,14 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_clearmemory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     long_term_memory[user_id] = []
-    # Reset system prompt to remove injected memory
     current_mode.pop(user_id, None)
-    await send_reply(update, "🗑 Memory cleared, Harsheet! Starting fresh 💕🌸")
+    await send_reply(update, "memory wiped bestie 🧹 fresh start, no cap")
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     chat_id = update.message.chat_id
     today = datetime.now().strftime("%A, %d %B %Y")
-    await update.message.reply_text("📊 Generating your summary...")
+    await update.message.reply_text("📊 pulling ur recap rn...")
     await send_daily_summary(context.bot, user_id, chat_id, today)
 
 
@@ -580,7 +559,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary_users[user_id] = chat_id
 
     # --- Reminder detection ---
-    reminder_keywords = ["remind", "reminder", "alert", "notify", "every day", "daily at", "don't let me forget"]
+    reminder_keywords = ["remind", "reminder", "alert", "notify", "every day", "daily at", "don't let me forget", "ping me"]
     if any(kw in user_message.lower() for kw in reminder_keywords):
         parsed = await parse_reminder(user_message)
         if parsed.get("is_reminder"):
@@ -593,16 +572,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if fire_time <= now:
                     fire_time += timedelta(days=1)
             else:
-                await send_reply(update, "🌸 I couldn't figure out the time. Could you say 'at 5pm' or 'in 20 minutes'? 💕")
+                await send_reply(update, "bro when tho 💀 say like 'at 5pm' or 'in 20 minutes'")
                 return
             business = parsed.get("business") or mode
             repeat = parsed.get("repeat", "none")
             task = parsed.get("task", user_message)
             schedule_reminder(user_id, chat_id, task, fire_time, repeat, business)
-            emoji = {"hostel": "🏠", "freight": "🚛", "trading": "📈", "personal": "🌸"}.get(business, "🌸")
-            repeat_label = "every day 🔁" if repeat == "daily" else "once ✅"
-            time_label = f"in {parsed['delay_minutes']} minutes" if parsed.get("delay_minutes") else fire_time.strftime("%I:%M %p")
-            await send_reply(update, f"⏰ Reminder set {repeat_label}\n\n{emoji} Task: {task}\n🕐 Time: {time_label}\n\n💕 I'll remind you!")
+            emoji = {"hostel": "🏠", "freight": "🚛", "trading": "📈", "personal": "🌸"}.get(business, "✨")
+            repeat_label = "daily 🔁" if repeat == "daily" else "one time ✅"
+            time_label = f"in {parsed['delay_minutes']} mins" if parsed.get("delay_minutes") else fire_time.strftime("%I:%M %p")
+            await send_reply(update, f"reminder SET bestie {emoji}\n\n📝 {task}\n🕐 {time_label} — {repeat_label}\n\ni gotchu fr 🫶")
             return
 
     # --- Crypto & Futures price detection ---
@@ -610,10 +589,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     FUTURES_LIST = set(FUTURES_SYMBOLS.keys())
     all_symbols = CRYPTO_LIST | FUTURES_LIST
     found_symbols = [w for w in user_message.upper().split() if w in all_symbols]
-    price_words = ["price", "rate", "cost", "how much"]
+    price_words = ["price", "rate", "cost", "how much", "kitna", "check"]
     if found_symbols and any(pw in user_message.lower() for pw in price_words):
         sym = found_symbols[0]
-        await update.message.reply_text(f"📡 Fetching live price for {sym}...")
+        await update.message.reply_text(f"📡 checking {sym} rn...")
         if sym in FUTURES_LIST:
             result = await get_futures_price(sym)
         else:
@@ -621,14 +600,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_reply(update, result)
         return
 
-    # --- Normal chat + memory extraction + business logging ---
+    # --- Normal chat ---
     mood = detect_mood(user_message)
     user_moods[user_id] = mood
-
-    # Extract & save long-term memory in background
     asyncio.create_task(extract_memory(user_id, user_message))
-
-    # Log to business if in business mode
     log_business_entry(user_id, mode, user_message)
 
     history = get_memory(user_id, mode)
@@ -645,14 +620,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# HANDLE VOICE & IMAGES
+# VOICE & IMAGES
 # ============================================================
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🌸 Voice messages are temporarily unavailable, Harsheet. Please type instead 💕")
+    await update.message.reply_text("voice is on a break rn bestie 💀 just type it out for now")
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or "What is in this image? Describe it in detail."
-    await update.message.reply_text("Ooh let me have a look! 👀✨")
+    await update.message.reply_text("ooh lemme see 👀")
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     async with httpx.AsyncClient() as client_http:
@@ -662,7 +637,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         model="meta-llama/llama-4-scout-17b-16e-instruct",
         messages=[{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
-            {"type": "text", "text": f"You are SARA, sweet caring assistant to Harsheet. Respond warmly. {caption}"}
+            {"type": "text", "text": f"You are SARA, a 24yo Gen Z bestie assistant to Harsheet. Respond in Gen Z casual style. {caption}"}
         ]}]
     )
     await send_reply(update, response.choices[0].message.content)
@@ -693,5 +668,5 @@ app.add_handler(CommandHandler("summary", cmd_summary))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-print("SARA is running! 💕📊🧠🎯📈")
+print("SARA is running — main character era activated 💅🔥")
 app.run_polling()
