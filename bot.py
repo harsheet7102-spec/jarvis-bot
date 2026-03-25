@@ -196,25 +196,40 @@ async def extract_memory(user_id, user_message):
 async def get_crypto_price(symbol: str) -> str:
     try:
         symbol = symbol.upper().strip()
-        # Map common names
-        name_map = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin", "DOGE": "dogecoin", "XRP": "ripple"}
-        coin_id = name_map.get(symbol, symbol.lower())
+        # Map common names to alternative.me slugs
+        name_map = {
+            "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+            "BNB": "binancecoin", "DOGE": "dogecoin", "XRP": "ripple",
+            "ADA": "cardano", "MATIC": "matic-network", "DOT": "polkadot",
+            "LTC": "litecoin", "SHIB": "shiba-inu", "AVAX": "avalanche-2"
+        }
+        coin_slug = name_map.get(symbol, symbol.lower())
+
         async with httpx.AsyncClient() as http:
+            # alternative.me — no API key, always free
             resp = await http.get(
-                f"https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": coin_id, "vs_currencies": "usd,inr", "include_24hr_change": "true"},
+                f"https://api.alternative.me/v2/ticker/{coin_slug}/",
+                params={"convert": "INR"},
                 timeout=10
             )
             if resp.status_code == 200:
-                data = resp.json()
-                if coin_id in data:
-                    d = data[coin_id]
-                    change = d.get("usd_24h_change", 0)
-                    arrow = "📈" if change >= 0 else "📉"
-                    return (f"{arrow} *{symbol}*\n"
-                            f"💵 ${d['usd']:,.2f} USD\n"
-                            f"🇮🇳 ₹{d['inr']:,.0f} INR\n"
-                            f"24h: {change:+.2f}%")
+                data = resp.json().get("data", {})
+                # data is a dict keyed by coin id number
+                coin_data = next(iter(data.values()), None)
+                if coin_data:
+                    quotes = coin_data.get("quotes", {})
+                    usd = quotes.get("USD", {})
+                    inr = quotes.get("INR", {})
+                    price_usd = usd.get("price", 0)
+                    price_inr = inr.get("price", 0)
+                    change_24h = usd.get("percentage_change_24h", 0)
+                    arrow = "📈" if change_24h >= 0 else "📉"
+                    return (
+                        f"{arrow} *{symbol}*\n"
+                        f"💵 ${price_usd:,.2f} USD\n"
+                        f"🇮🇳 ₹{price_inr:,.0f} INR\n"
+                        f"24h: {change_24h:+.2f}%"
+                    )
         return f"Couldn't fetch price for {symbol} 🌸"
     except Exception as e:
         print(f"Crypto error: {e}")
