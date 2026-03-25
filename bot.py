@@ -236,6 +236,56 @@ async def get_crypto_price(symbol: str) -> str:
         return f"Couldn't fetch price right now 🌸"
 
 
+# --- Futures / Stocks via Yahoo Finance (15min delayed, free) ---
+FUTURES_SYMBOLS = {
+    "MNQ": "MNQ=F",  # Micro E-mini Nasdaq-100
+    "MGC": "MGC=F",  # Micro Gold
+    "MES": "MES=F",  # Micro E-mini S&P 500
+    "MCL": "MCL=F",  # Micro Crude Oil
+    "M2K": "M2K=F",  # Micro Russell 2000
+    "GC":  "GC=F",   # Gold Futures
+    "CL":  "CL=F",   # Crude Oil Futures
+    "ES":  "ES=F",   # E-mini S&P 500
+    "NQ":  "NQ=F",   # E-mini Nasdaq-100
+}
+
+async def get_futures_price(symbol: str) -> str:
+    try:
+        symbol = symbol.upper().strip()
+        ticker = FUTURES_SYMBOLS.get(symbol, f"{symbol}=F")
+        async with httpx.AsyncClient() as http:
+            resp = await http.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+                params={"interval": "1m", "range": "1d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
+                price = meta.get("regularMarketPrice") or meta.get("previousClose")
+                prev = meta.get("previousClose", price)
+                currency = meta.get("currency", "USD")
+                name = meta.get("longName") or meta.get("shortName") or symbol
+                if price:
+                    change = price - prev
+                    change_pct = (change / prev * 100) if prev else 0
+                    arrow = "📈" if change >= 0 else "📉"
+                    inr_rate = 83.5
+                    price_inr = price * inr_rate
+                    return (
+                        f"{arrow} *{symbol}* — {name}\n"
+                        f"💵 ${price:,.2f} {currency}\n"
+                        f"🇮🇳 ₹{price_inr:,.0f} INR (approx)\n"
+                        f"Change: {change:+.2f} ({change_pct:+.2f}%)\n"
+                        f"⚠️ Data may be 15 min delayed"
+                    )
+        return f"Couldn't fetch price for {symbol} 🌸"
+    except Exception as e:
+        print(f"Futures error: {e}")
+        return f"Couldn't fetch price right now 🌸"
+
+
 def schedule_reminder(user_id, chat_id, task, fire_time, repeat, business):
     reminders.append({
         "user_id": user_id, "chat_id": chat_id, "task": task,
@@ -441,11 +491,15 @@ async def cmd_clearreminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
-        await send_reply(update, "💕 Please tell me which coin, Harsheet! e.g. /price BTC or /price ETH 🌸")
+        await send_reply(update, "💕 Tell me what to fetch, Harsheet!\n\nCrypto: /price BTC /price ETH\nFutures: /price MNQ /price MGC /price MES 🌸")
         return
     symbol = args[0].upper()
     await update.message.reply_text(f"📡 Fetching price for {symbol}...")
-    result = await get_crypto_price(symbol)
+    CRYPTO_LIST = {"BTC","ETH","SOL","BNB","DOGE","XRP","ADA","MATIC","DOT","LTC","SHIB","AVAX"}
+    if symbol in FUTURES_SYMBOLS or symbol not in CRYPTO_LIST:
+        result = await get_futures_price(symbol)
+    else:
+        result = await get_crypto_price(symbol)
     await send_reply(update, result)
 
 async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -551,15 +605,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_reply(update, f"⏰ Reminder set {repeat_label}\n\n{emoji} Task: {task}\n🕐 Time: {time_label}\n\n💕 I'll remind you!")
             return
 
-    # --- Crypto price detection ---
-    crypto_match = re.search(r'\b(price|cost|rate)\s+(?:of\s+)?([A-Za-z]+)\b', user_message, re.IGNORECASE)
-    if crypto_match or any(c in user_message.upper() for c in ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP"]):
-        symbols = re.findall(r'\b(BTC|ETH|SOL|BNB|DOGE|XRP|bitcoin|ethereum|solana)\b', user_message, re.IGNORECASE)
-        if symbols:
-            await update.message.reply_text("📡 Fetching live price...")
-            result = await get_crypto_price(symbols[0])
-            await send_reply(update, result)
-            return
+    # --- Crypto & Futures price detection ---
+    CRYPTO_LIST = {"BTC","ETH","SOL","BNB","DOGE","XRP","ADA","MATIC","DOT","LTC","SHIB","AVAX"}
+    FUTURES_LIST = set(FUTURES_SYMBOLS.keys())
+    all_symbols = CRYPTO_LIST | FUTURES_LIST
+    found_symbols = [w for w in user_message.upper().split() if w in all_symbols]
+    price_words = ["price", "rate", "cost", "how much"]
+    if found_symbols and any(pw in user_message.lower() for pw in price_words):
+        sym = found_symbols[0]
+        await update.message.reply_text(f"📡 Fetching live price for {sym}...")
+        if sym in FUTURES_LIST:
+            result = await get_futures_price(sym)
+        else:
+            result = await get_crypto_price(sym)
+        await send_reply(update, result)
+        return
 
     # --- Normal chat + memory extraction + business logging ---
     mood = detect_mood(user_message)
