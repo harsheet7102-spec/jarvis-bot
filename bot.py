@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 from groq import Groq
