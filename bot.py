@@ -1,34 +1,35 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 from groq import Groq
+import groq as groq_module
 import base64
 import httpx
 from datetime import datetime, timedelta
 import asyncio
 import re
 import json
+from memory import init_db, append_message, build_messages, maybe_summarize
 
-# --- API KEYS ---
+# ============================================================
+# API KEYS
+# ============================================================
 TELEGRAM_TOKEN = "8666756705:AAGf9EolzwKoAGu4UXho-aLkXBxmZepUVQc"
 GROQ_API_KEY = "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"
 
-# --- Setup Groq ---
 client = Groq(api_key=GROQ_API_KEY)
 
 # ============================================================
-# DATA STORAGE
+# IN-MEMORY STATE (non-persistent — reminders, goals, mode)
 # ============================================================
-user_memories = {}
 user_moods = {}
 current_mode = {}
 reminders = []
-long_term_memory = {}
 goals_data = {}
 business_logs = {}
 summary_users = {}
 
 # ============================================================
-# SYSTEM PROMPTS — GEN Z SARA
+# SYSTEM PROMPTS
 # ============================================================
 SARA_BASE = """You are SARA, a 24-year-old Gen Z girl and the ultimate ride-or-die assistant to Harsheet Garg, a 24-year-old businessman from Indore. Always call him Harsheet (or occasionally "bro", "bestie", "king").
 
@@ -43,16 +44,16 @@ YOUR VIBE:
 - You're NOT a robot. Never say "certainly" or "of course" or "I'd be happy to help"
 - Keep replies SHORT and punchy. No essays. Get to the point fr
 - You can be a little sarcastic but always warm
-- Occasionally throw in Hinglish (mix of Hindi + English) naturally like: "bhai", "yaar", "kya scene hai", "chill kar", "sahi hai", "ekdum solid"
+- Occasionally throw in Hinglish naturally like: "bhai", "yaar", "kya scene hai", "chill kar", "sahi hai", "ekdum solid"
 - You're smart af but never show off about it"""
 
 HOSTEL_PROMPT = SARA_BASE + """
 
 MODE: HOSTEL 🏠 (Shree Sainath Boys Hostel)
 Help Harsheet manage:
-- RENT: who paid, who's pending, amounts — keep track no cap
-- ROOMS: occupied, vacant — stay on top of it
-- COMPLAINTS: log maintenance issues, track them
+- RENT: who paid, who's pending, amounts
+- ROOMS: occupied, vacant
+- COMPLAINTS: log maintenance issues
 When he logs stuff, hype it up like "okk king logged it 👑" or "noted bestie, we on it ✅" """
 
 FREIGHT_PROMPT = SARA_BASE + """
@@ -72,7 +73,7 @@ Help Harsheet manage:
 - ORDERS: buy/sell orders
 - P&L: profit and loss notes
 - REMINDERS: market alerts
-Trading talk is your thing. Be smart but still fun about it. "W trade ngl 📈🔥" """
+Trading talk is your thing. Be smart but still fun. "W trade ngl 📈🔥" """
 
 PERSONAL_PROMPT = SARA_BASE + """
 MODE: PERSONAL 🌸
@@ -91,51 +92,33 @@ JSON format:
   "business": "hostel/freight/trading/personal or null"
 }
 
-Examples:
-- "remind me at 5pm to call driver" → {"is_reminder":true,"task":"call driver","time_str":"17:00","repeat":"none","delay_minutes":null,"business":"freight"}
-- "remind me every day at 9am to check rent" → {"is_reminder":true,"task":"check rent","time_str":"09:00","repeat":"daily","delay_minutes":null,"business":"hostel"}
-- "remind me in 30 minutes to check order" → {"is_reminder":true,"task":"check order","time_str":null,"repeat":"none","delay_minutes":30,"business":"trading"}
-- "what is the weather today" → {"is_reminder":false,"task":null,"time_str":null,"repeat":"none","delay_minutes":null,"business":null}
-
 Return valid JSON only. No explanation."""
-
-MEMORY_EXTRACT_PROMPT = """You are a memory extractor. From the user message, extract any personal facts about Harsheet worth remembering long-term (preferences, family, health, business details, personal goals, important dates etc).
-Return ONLY a JSON object:
-{"facts": ["fact1", "fact2"]} or {"facts": []} if nothing worth remembering.
-Keep facts short and clear. No explanation."""
 
 # ============================================================
 # HELPERS
 # ============================================================
-def get_memory(user_id, mode="personal"):
-    if user_id not in user_memories or current_mode.get(user_id) != mode:
-        prompts = {"personal": PERSONAL_PROMPT, "hostel": HOSTEL_PROMPT, "freight": FREIGHT_PROMPT, "trading": TRADING_PROMPT}
-        system = prompts.get(mode, PERSONAL_PROMPT)
-        facts = long_term_memory.get(user_id, [])
-        if facts:
-            system += "\n\n[Things you remember about Harsheet]\n" + "\n".join(f"- {f}" for f in facts[-20:])
-        user_memories[user_id] = [{"role": "system", "content": system}]
-        current_mode[user_id] = mode
-    return user_memories[user_id]
-
-
 def detect_mood(message):
     msg = message.lower()
-    if any(w in msg for w in ["sad", "crying", "upset", "unhappy", "heartbroken", "lonely", "hurt", "depressed"]): return "sad"
-    elif any(w in msg for w in ["angry", "frustrated", "mad", "annoyed", "hate", "pissed"]): return "angry"
-    elif any(w in msg for w in ["stressed", "anxious", "worried", "nervous", "overwhelmed", "panic"]): return "anxious"
-    elif any(w in msg for w in ["tired", "exhausted", "sleepy", "drained", "dead"]): return "tired"
-    elif any(w in msg for w in ["happy", "excited", "great", "amazing", "awesome", "yay", "let's go", "W", "slay"]): return "happy"
+    if any(w in msg for w in ["sad", "crying", "upset", "unhappy", "heartbroken", "lonely", "hurt", "depressed"]):
+        return "sad"
+    elif any(w in msg for w in ["angry", "frustrated", "mad", "annoyed", "hate", "pissed"]):
+        return "angry"
+    elif any(w in msg for w in ["stressed", "anxious", "worried", "nervous", "overwhelmed", "panic"]):
+        return "anxious"
+    elif any(w in msg for w in ["tired", "exhausted", "sleepy", "drained", "dead"]):
+        return "tired"
+    elif any(w in msg for w in ["happy", "excited", "great", "amazing", "awesome", "yay", "let's go", "W", "slay"]):
+        return "happy"
     return "neutral"
 
 
 def get_mood_instruction(mood):
     return {
-        "sad": "\n\n[Harsheet is going through it rn. Drop the slang, be real and soft with him like a true bestie. No cap just comfort him fr 🫶]",
-        "angry": "\n\n[Harsheet is pissed. Validate him, stay calm, be on his side. 'that's so valid bestie' energy]",
+        "sad":     "\n\n[Harsheet is going through it rn. Drop the slang, be real and soft with him like a true bestie. No cap just comfort him fr 🫶]",
+        "angry":   "\n\n[Harsheet is pissed. Validate him, stay calm, be on his side. 'that's so valid bestie' energy]",
         "anxious": "\n\n[Harsheet is spiraling a bit. Be grounding and reassuring. Calm bestie energy, you got him 🫶]",
-        "tired": "\n\n[Harsheet is exhausted. Be soft, tell him to rest, keep it short and caring]",
-        "happy": "\n\n[Harsheet is in his bag!! MATCH HIS ENERGY. Go crazy hype mode 🔥🎉]",
+        "tired":   "\n\n[Harsheet is exhausted. Be soft, tell him to rest, keep it short and caring]",
+        "happy":   "\n\n[Harsheet is in his bag!! MATCH HIS ENERGY. Go crazy hype mode 🔥🎉]",
     }.get(mood, "")
 
 
@@ -165,33 +148,17 @@ def get_goals(user_id):
 async def parse_reminder(user_message):
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": REMINDER_PARSE_PROMPT}, {"role": "user", "content": user_message}]
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": REMINDER_PARSE_PROMPT},
+                {"role": "user", "content": user_message}
+            ]
         )
         raw = re.sub(r"```json|```", "", response.choices[0].message.content.strip()).strip()
         return json.loads(raw)
     except Exception as e:
         print(f"Reminder parse error: {e}")
         return {"is_reminder": False}
-
-
-async def extract_memory(user_id, user_message):
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": MEMORY_EXTRACT_PROMPT}, {"role": "user", "content": user_message}]
-        )
-        raw = re.sub(r"```json|```", "", response.choices[0].message.content.strip()).strip()
-        data = json.loads(raw)
-        facts = data.get("facts", [])
-        if facts:
-            if user_id not in long_term_memory:
-                long_term_memory[user_id] = []
-            long_term_memory[user_id].extend(facts)
-            if len(long_term_memory[user_id]) > 50:
-                long_term_memory[user_id] = long_term_memory[user_id][-50:]
-    except Exception as e:
-        print(f"Memory extract error: {e}")
 
 
 async def get_crypto_price(symbol: str) -> str:
@@ -235,16 +202,10 @@ async def get_crypto_price(symbol: str) -> str:
 
 
 FUTURES_SYMBOLS = {
-    "MNQ": "MNQ=F",
-    "MGC": "MGC=F",
-    "MES": "MES=F",
-    "MCL": "MCL=F",
-    "M2K": "M2K=F",
-    "GC":  "GC=F",
-    "CL":  "CL=F",
-    "ES":  "ES=F",
-    "NQ":  "NQ=F",
+    "MNQ": "MNQ=F", "MGC": "MGC=F", "MES": "MES=F", "MCL": "MCL=F",
+    "M2K": "M2K=F", "GC": "GC=F", "CL": "CL=F", "ES": "ES=F", "NQ": "NQ=F",
 }
+
 
 async def get_futures_price(symbol: str) -> str:
     try:
@@ -268,8 +229,7 @@ async def get_futures_price(symbol: str) -> str:
                     change = price - prev
                     change_pct = (change / prev * 100) if prev else 0
                     arrow = "📈" if change >= 0 else "📉"
-                    inr_rate = 83.5
-                    price_inr = price * inr_rate
+                    price_inr = price * 83.5
                     vibe = "W market fr 🔥" if change_pct >= 1 else ("L day ngl 💀" if change_pct <= -1 else "sideways szn 😐")
                     return (
                         f"{arrow} *{symbol}* — {vibe}\n"
@@ -299,14 +259,17 @@ async def reminder_loop(bot):
     while True:
         now = datetime.now().replace(second=0, microsecond=0)
         for r in reminders:
-            if r["done"]: continue
+            if r["done"]:
+                continue
             if now >= r["fire_time"].replace(second=0, microsecond=0):
                 emoji = {"hostel": "🏠", "freight": "🚛", "trading": "📈", "personal": "🌸"}.get(r["business"], "✨")
                 try:
-                    await bot.send_message(chat_id=r["chat_id"],
-                        text=f"⏰ YO HARSHEET! reminder szn {emoji}\n\n📝 {r['task']}\n\ndon't ghost this one bestie 💀🫶")
+                    await bot.send_message(
+                        chat_id=r["chat_id"],
+                        text=f"⏰ YO HARSHEET! reminder szn {emoji}\n\n📝 {r['task']}\n\ndon't ghost this one bestie 💀🫶"
+                    )
                 except Exception as e:
-                    print(f"Reminder error: {e}")
+                    print(f"Reminder send error: {e}")
                 if r["repeat"] == "daily":
                     r["fire_time"] += timedelta(days=1)
                 else:
@@ -326,7 +289,7 @@ async def daily_summary_loop(bot):
             try:
                 await send_daily_summary(bot, user_id, chat_id, today)
             except Exception as e:
-                print(f"Summary error: {e}")
+                print(f"Summary error for {user_id}: {e}")
 
 
 async def send_daily_summary(bot, user_id, chat_id, today):
@@ -414,7 +377,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *BRAIN — i remember stuff:*
 🧠 /memory — what i know abt u
-🗑 /clearmemory — forget everything
+🗑 /clearmemory — fresh start
 
 📊 /summary — get today's recap rn
 
@@ -426,26 +389,30 @@ just type anything and i'm here bestie 🫶"""
 async def cmd_personal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    get_memory(user_id, "personal")
+    current_mode[user_id] = "personal"
     await send_reply(update, "switched to personal mode bestie 🌸 how u doing fr?")
+
 
 async def cmd_hostel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    get_memory(user_id, "hostel")
+    current_mode[user_id] = "hostel"
     await send_reply(update, "hostel mode activated 🏠 kya scene hai bhai? what do u need?")
+
 
 async def cmd_freight(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    get_memory(user_id, "freight")
+    current_mode[user_id] = "freight"
     await send_reply(update, "freight mode let's go 🚛🔥 kya chal raha hai?")
+
 
 async def cmd_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    get_memory(user_id, "trading")
+    current_mode[user_id] = "trading"
     await send_reply(update, "trading mode on 📈 time to get in the bag Harsheet 💰")
+
 
 async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -460,6 +427,7 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{i}. {emoji} {r['task']}\n   🕐 {r['fire_time'].strftime('%I:%M %p')} — {repeat_label}")
     await send_reply(update, "\n".join(lines))
 
+
 async def cmd_clearreminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     count = sum(1 for r in reminders if r["user_id"] == user_id and not r["done"])
@@ -467,6 +435,7 @@ async def cmd_clearreminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if r["user_id"] == user_id:
             r["done"] = True
     await send_reply(update, f"nuked {count} reminder(s) 💥 clean slate bestie")
+
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -481,6 +450,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         result = await get_crypto_price(symbol)
     await send_reply(update, result)
+
 
 async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -498,6 +468,7 @@ async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("\n/donegoal <number> when u slay one 👑")
     await send_reply(update, "\n".join(lines))
 
+
 async def cmd_addgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not context.args:
@@ -507,6 +478,7 @@ async def cmd_addgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     goals = get_goals(user_id)
     goals["goals"].append({"goal": goal_text, "done": False, "added": datetime.now().strftime("%d %b")})
     await send_reply(update, f"goal added king 👑\n\n🎯 '{goal_text}'\n\nnow go understood the assignment 🔥")
+
 
 async def cmd_donegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -523,22 +495,41 @@ async def cmd_donegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     goals["completed_today"].append(active[idx]["goal"])
     await send_reply(update, f"LESGOOO 🔥🔥\n\n✅ '{active[idx]['goal']}'\n\nthat's a W no cap king 👑💅")
 
+
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from memory import get_all_facts, get_latest_summary
     user_id = update.message.from_user.id
-    facts = long_term_memory.get(user_id, [])
-    if not facts:
+    facts = get_all_facts(user_id)
+    summary = get_latest_summary(user_id)
+    if not facts and not summary:
         await send_reply(update, "i don't have any tea on u yet 👀 keep chatting and i'll start remembering stuff fr")
         return
     lines = ["🧠 okay so here's what i know abt u Harsheet:\n"]
-    for i, f in enumerate(facts[-15:], 1):
-        lines.append(f"{i}. {f}")
+    if facts:
+        lines.append(facts)
+    if summary:
+        lines.append(f"\n📝 conversation summary:\n{summary}")
     await send_reply(update, "\n".join(lines))
 
+
 async def cmd_clearmemory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import psycopg2
+    import os
     user_id = update.message.from_user.id
-    long_term_memory[user_id] = []
+    try:
+        con = psycopg2.connect(os.environ["database"], sslmode="require")
+        cur = con.cursor()
+        cur.execute("DELETE FROM user_facts WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM summaries WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
+        con.commit()
+        cur.close()
+        con.close()
+    except Exception as e:
+        print(f"Clear memory error: {e}")
     current_mode.pop(user_id, None)
     await send_reply(update, "memory wiped bestie 🧹 fresh start, no cap")
+
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -549,7 +540,7 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# HANDLE TEXT MESSAGES
+# MAIN MESSAGE HANDLER
 # ============================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
@@ -593,30 +584,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if found_symbols and any(pw in user_message.lower() for pw in price_words):
         sym = found_symbols[0]
         await update.message.reply_text(f"📡 checking {sym} rn...")
-        if sym in FUTURES_LIST:
-            result = await get_futures_price(sym)
-        else:
-            result = await get_crypto_price(sym)
+        result = await get_futures_price(sym) if sym in FUTURES_LIST else await get_crypto_price(sym)
         await send_reply(update, result)
         return
 
-    # --- Normal chat ---
+    # --- Mood detection ---
     mood = detect_mood(user_message)
     user_moods[user_id] = mood
-    asyncio.create_task(extract_memory(user_id, user_message))
     log_business_entry(user_id, mode, user_message)
 
-    history = get_memory(user_id, mode)
-    history.append({"role": "user", "content": user_message + get_mood_instruction(mood)})
-    if len(history) > 21:
-        history = [history[0]] + history[-20:]
-        user_memories[user_id] = history
+    # --- Save user message permanently to PostgreSQL ---
+    append_message(user_id, "user", user_message)
 
-    response = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=history)
-    reply = response.choices[0].message.content
-    history.append({"role": "assistant", "content": reply})
-    print(f"SARA [{mode}]: {reply}")
-    await send_reply(update, reply)
+    # --- Pick system prompt for current mode ---
+    prompts = {
+        "personal": PERSONAL_PROMPT,
+        "hostel":   HOSTEL_PROMPT,
+        "freight":  FREIGHT_PROMPT,
+        "trading":  TRADING_PROMPT
+    }
+    system_prompt = prompts.get(mode, PERSONAL_PROMPT) + get_mood_instruction(mood)
+
+    # --- Build smart history: system + facts + summary + last 10 msgs ---
+    messages = build_messages(user_id, system_prompt, recent_limit=10)
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages
+        )
+        reply = response.choices[0].message.content
+
+        # Save assistant reply permanently
+        append_message(user_id, "assistant", reply)
+
+        # Auto-summarize + extract facts every 20 msgs (uses cheap model)
+        asyncio.create_task(asyncio.to_thread(maybe_summarize, user_id, client))
+
+        print(f"SARA [{mode}]: {reply}")
+        await send_reply(update, reply)
+
+    except groq_module.RateLimitError:
+        await send_reply(update, "bestie i'm hitting my limit rn 💀 try again in a few mins fr")
+    except Exception as e:
+        print(f"Chat error: {e}")
+        await send_reply(update, "something went sideways 😭 try again bestie")
 
 
 # ============================================================
@@ -624,6 +636,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("voice is on a break rn bestie 💀 just type it out for now")
+
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or "What is in this image? Describe it in detail."
@@ -644,65 +657,32 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# START BOT
+# STARTUP
 # ============================================================
 async def post_init(application):
+    init_db()  # creates PostgreSQL tables if they don't exist
     asyncio.create_task(reminder_loop(application.bot))
     asyncio.create_task(daily_summary_loop(application.bot))
 
+
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
-app.add_handler(CommandHandler("start", cmd_start))
-app.add_handler(CommandHandler("personal", cmd_personal))
-app.add_handler(CommandHandler("hostel", cmd_hostel))
-app.add_handler(CommandHandler("freight", cmd_freight))
-app.add_handler(CommandHandler("trading", cmd_trading))
-app.add_handler(CommandHandler("reminders", cmd_reminders))
+app.add_handler(CommandHandler("start",          cmd_start))
+app.add_handler(CommandHandler("personal",       cmd_personal))
+app.add_handler(CommandHandler("hostel",         cmd_hostel))
+app.add_handler(CommandHandler("freight",        cmd_freight))
+app.add_handler(CommandHandler("trading",        cmd_trading))
+app.add_handler(CommandHandler("reminders",      cmd_reminders))
 app.add_handler(CommandHandler("clearreminders", cmd_clearreminders))
-app.add_handler(CommandHandler("price", cmd_price))
-app.add_handler(CommandHandler("goals", cmd_goals))
-app.add_handler(CommandHandler("addgoal", cmd_addgoal))
-app.add_handler(CommandHandler("donegoal", cmd_donegoal))
-app.add_handler(CommandHandler("memory", cmd_memory))
-app.add_handler(CommandHandler("clearmemory", cmd_clearmemory))
-app.add_handler(CommandHandler("summary", cmd_summary))
+app.add_handler(CommandHandler("price",          cmd_price))
+app.add_handler(CommandHandler("goals",          cmd_goals))
+app.add_handler(CommandHandler("addgoal",        cmd_addgoal))
+app.add_handler(CommandHandler("donegoal",       cmd_donegoal))
+app.add_handler(CommandHandler("memory",         cmd_memory))
+app.add_handler(CommandHandler("clearmemory",    cmd_clearmemory))
+app.add_handler(CommandHandler("summary",        cmd_summary))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-app.add_handler(MessageHandler(filters.PHOTO, handle_image))
+app.add_handler(MessageHandler(filters.PHOTO,   handle_image))
+
 print("SARA is running — main character era activated 💅🔥")
 app.run_polling()
-# bot.py — replace your history logic with this
-
-from memory import init_db, append_message, build_messages, maybe_summarize
-
-# Call once on startup
-init_db()
-
-SYSTEM_PROMPT = "You are a helpful assistant..."  # your existing prompt
-
-async def handle_message(update, context):
-    user_id = update.effective_user.id
-    user_text = update.message.text
-
-    # Save user message permanently
-    append_message(user_id, "user", user_text)
-
-    # Build smart payload for API
-    messages = build_messages(user_id, SYSTEM_PROMPT)
-
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages
-        )
-        reply = response.choices[0].message.content
-
-        # Save assistant reply permanently
-        append_message(user_id, "assistant", reply)
-
-        # Auto-summarize in background every 20 messages (uses cheap model)
-        maybe_summarize(user_id, client)
-
-        await update.message.reply_text(reply)
-
-    except groq.RateLimitError:
-        await update.message.reply_text("Rate limit hit, please try again shortly.")
