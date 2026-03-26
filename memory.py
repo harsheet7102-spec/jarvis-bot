@@ -6,7 +6,7 @@ import psycopg2
 import psycopg2.extras
 from urllib.parse import urlparse
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.environ.get("database") or os.environ.get("DATABASE_URL")
 
 # ─── Connection ───────────────────────────────────────────────────────────────
 
