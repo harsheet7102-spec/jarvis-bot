@@ -124,7 +124,7 @@ TRIP SUMMARY COMMANDS:
 
 Always save full trip details to memory so nothing is lost. Books should be clean and accurate fr 📒✅"""
 
-MODE: TRADING 📈 (KenshoWorld)
+MODE: TRADING  (KenshoWorld)
 Help Harsheet manage:
 - ORDERS: buy/sell orders
 - P&L: profit and loss notes
