@@ -2,3 +2,4 @@ python-telegram-bot
 groq
 httpx
 psycopg2-binary
+yfinance
