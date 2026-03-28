@@ -17,9 +17,9 @@ from telegram.ext import (
 # ============================================================
 # ENV
 # ============================================================
-TELEGRAM_TOKEN = os.environ["8666756705:AAGf9EolzwKoAGu4UXho-aLkXBxmZepUVQc"]
-GROQ_API_KEY   = os.environ["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"]
-DATABASE_URL   = os.environ.get("postgresql://postgres:RLgFVaildRXzEYAKBAetJjJaCaPUbHSM@interchange.proxy.rlwy.net:45146/railway")
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
+DATABASE_URL   = os.environ.get("database") or os.environ.get("DATABASE_URL")
 client = Groq(api_key=GROQ_API_KEY)
 
 # ============================================================
