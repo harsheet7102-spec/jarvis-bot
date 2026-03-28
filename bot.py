@@ -1,9 +1,190 @@
 # -*- coding: utf-8 -*-
+import os
+import asyncio
+import base64
+import json
+import psycopg2
+import httpx
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 from groq import Groq
+import groq as groq_module
+
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
 
 client = Groq(api_key=GROQ_API_KEY)
+
+# ============================================================
+# PERSISTENT STORAGE HELPERS (PostgreSQL)
+# ============================================================
+def get_db():
+    db_url = os.environ.get("database") or os.environ.get("DATABASE_URL")
+    return psycopg2.connect(db_url, sslmode="require")
+
+def init_db():
+    con = get_db()
+    cur = con.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            role TEXT,
+            content TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_facts (
+            user_id BIGINT PRIMARY KEY,
+            facts TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS summaries (
+            user_id BIGINT PRIMARY KEY,
+            summary TEXT
+        )
+    """)
+    con.commit()
+    cur.close()
+    con.close()
+
+def append_message(user_id, role, content):
+    try:
+        con = get_db()
+        cur = con.cursor()
+        cur.execute("INSERT INTO messages (user_id, role, content) VALUES (%s, %s, %s)", (user_id, role, content))
+        con.commit()
+        cur.close()
+        con.close()
+    except Exception as e:
+        print(f"append_message error: {e}")
+
+def get_recent_messages(user_id, limit=20):
+    try:
+        con = get_db()
+        cur = con.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+            (user_id, limit)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        con.close()
+        return [{"role": r, "content": c} for r, c in reversed(rows)]
+    except Exception as e:
+        print(f"get_recent_messages error: {e}")
+        return []
+
+def get_all_facts(user_id):
+    try:
+        con = get_db()
+        cur = con.cursor()
+        cur.execute("SELECT facts FROM user_facts WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        cur.close()
+        con.close()
+        return row[0] if row else ""
+    except Exception as e:
+        print(f"get_all_facts error: {e}")
+        return ""
+
+def get_latest_summary(user_id):
+    try:
+        con = get_db()
+        cur = con.cursor()
+        cur.execute("SELECT summary FROM summaries WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        cur.close()
+        con.close()
+        return row[0] if row else ""
+    except Exception as e:
+        print(f"get_latest_summary error: {e}")
+        return ""
+
+def maybe_summarize(user_id, groq_client):
+    try:
+        con = get_db()
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s", (user_id,))
+        count = cur.fetchone()[0]
+        cur.close()
+        con.close()
+        if count % 20 != 0:
+            return
+        history = get_recent_messages(user_id, limit=40)
+        text = "\n".join(f"{m['role']}: {m['content']}" for m in history)
+
+        # Extract facts
+        facts_resp = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Extract key facts about the user from this conversation. Return a short bullet list. Only include stable facts (name, business, preferences, goals). No filler."},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=300,
+        )
+        facts = facts_resp.choices[0].message.content.strip()
+
+        # Summarize
+        sum_resp = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Summarize this conversation in 3-5 sentences. Focus on what was discussed and any decisions made."},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=200,
+        )
+        summary = sum_resp.choices[0].message.content.strip()
+
+        con = get_db()
+        cur = con.cursor()
+        cur.execute("INSERT INTO user_facts (user_id, facts) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET facts = %s", (user_id, facts, facts))
+        cur.execute("INSERT INTO summaries (user_id, summary) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET summary = %s", (user_id, summary, summary))
+        con.commit()
+        cur.close()
+        con.close()
+    except Exception as e:
+        print(f"maybe_summarize error: {e}")
+
+# ============================================================
+# IN-MEMORY STATE
+# ============================================================
+reminders      = []
+summary_users  = {}
+business_logs  = {}
+goals_data     = {}
+user_moods     = {}
+current_mode   = {}
+
+def get_business_log(user_id):
+    if user_id not in business_logs:
+        business_logs[user_id] = {"hostel": [], "freight": [], "trading": []}
+    return business_logs[user_id]
+
+def get_goals(user_id):
+    if user_id not in goals_data:
+        goals_data[user_id] = {"goals": [], "completed_today": []}
+    return goals_data[user_id]
+
+async def parse_reminder(text):
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": REMINDER_PARSE_PROMPT},
+                {"role": "user",   "content": text}
+            ],
+            max_tokens=200,
+        )
+        raw = resp.choices[0].message.content.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(raw)
+    except Exception as e:
+        print(f"parse_reminder error: {e}")
+        return {"is_reminder": False}
 
 # ============================================================
 # IN-MEMORY STATE
