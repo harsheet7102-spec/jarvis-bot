@@ -20,6 +20,7 @@ from telegram.ext import (
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
 DATABASE_URL   = os.environ.get("database") or os.environ.get("DATABASE_URL")
+
 client = Groq(api_key=GROQ_API_KEY)
 
 # ============================================================
@@ -345,6 +346,80 @@ FUTURES_SYMBOLS = {
     "SENSEX":    ("^BSESN",  "BSE Sensex",              "INR"),
 }
 
+# ============================================================
+# FUTURES CALCULATOR
+# Fixed: 1 contract, $50 SL, $100 TP (1:2 ratio)
+#
+# Contract specs ($ per 1 point, 1 contract):
+#   MNQ — tick=0.25, tick value=$0.50 → $2.00/point
+#   MGC — tick=0.10, tick value=$1.00 → $10.00/point
+#   MES — tick=0.25, tick value=$1.25 → $5.00/point
+# ============================================================
+CALC_SPECS = {
+    "MNQ": (0.25,  2.00,  "Micro Nasdaq"),
+    "MGC": (0.10,  10.00, "Micro Gold"),
+    "MES": (0.25,  5.00,  "Micro S&P 500"),
+    "NQ":  (0.25,  20.00, "Nasdaq"),
+    "ES":  (0.25,  50.00, "S&P 500"),
+    "GC":  (0.10,  100.00,"Gold"),
+}
+
+SL_DOLLARS = 50.0
+TP_DOLLARS  = 100.0
+CONTRACTS   = 1
+
+def calc_levels(symbol: str, entry: float, direction: str):
+    sym = symbol.upper()
+    if sym not in CALC_SPECS:
+        return None
+    tick_size, dollar_per_point, name = CALC_SPECS[sym]
+    sl_points = SL_DOLLARS / dollar_per_point
+    tp_points = TP_DOLLARS / dollar_per_point
+    sl_ticks  = sl_points / tick_size
+    tp_ticks  = tp_points / tick_size
+
+    if direction.upper() in ("LONG", "BUY"):
+        sl_price = entry - sl_points
+        tp_price = entry + tp_points
+    else:
+        sl_price = entry + sl_points
+        tp_price = entry - tp_points
+
+    sl_price = round(round(sl_price / tick_size) * tick_size, 4)
+    tp_price = round(round(tp_price / tick_size) * tick_size, 4)
+
+    return {
+        "symbol":     sym,
+        "name":       name,
+        "direction":  direction.upper(),
+        "entry":      entry,
+        "sl_price":   sl_price,
+        "tp_price":   tp_price,
+        "sl_points":  sl_points,
+        "tp_points":  tp_points,
+        "sl_ticks":   int(sl_ticks),
+        "tp_ticks":   int(tp_ticks),
+        "sl_dollars": SL_DOLLARS,
+        "tp_dollars": TP_DOLLARS,
+        "contracts":  CONTRACTS,
+        "rr":         "1:2",
+    }
+
+def format_calc(c: dict) -> str:
+    direction = "LONG" if c["direction"] in ("LONG", "BUY") else "SHORT"
+    return (
+        f"Trade Plan — {c['symbol']} {direction}\n"
+        f"─────────────────────\n"
+        f"Entry:      {c['entry']}\n"
+        f"Stop Loss:  {c['sl_price']}  (-{c['sl_ticks']} ticks / ${c['sl_dollars']:.0f})\n"
+        f"Take Profit:{c['tp_price']}  (+{c['tp_ticks']} ticks / ${c['tp_dollars']:.0f})\n"
+        f"─────────────────────\n"
+        f"Contracts:  {c['contracts']}\n"
+        f"R:R Ratio:  {c['rr']}\n"
+        f"Max Risk:   ${c['sl_dollars']:.0f}\n"
+        f"Max Gain:   ${c['tp_dollars']:.0f}"
+    )
+
 async def get_price(symbol: str) -> str:
     try:
         import yfinance as yf
@@ -522,13 +597,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary_users[user_id] = update.message.chat_id
     text = (
         "Hey Harsheet, I am SARA — your trading assistant.\n\n"
+        "CALCULATOR:\n"
+        "/calc MNQ long 21500 — instant trade plan\n"
+        "/calc MGC short 3050 — gold short plan\n"
+        "/calc MES long 6000  — MES long plan\n"
+        "(Fixed: 1 contract, $50 SL, $100 TP, 1:2 R:R)\n\n"
+        "Or just type: mnq long 21500\n\n"
         "TRADES:\n"
         "/trades — recent trades\n"
         "/open — open positions\n"
         "/pnl — P&L summary\n\n"
         "PRICES:\n"
-        "/price MNQ — futures price\n"
-        "/price MGC — gold price\n\n"
+        "/price MNQ — live futures price\n\n"
         "REMINDERS:\n"
         "/reminders — active reminders\n"
         "/clearreminders — clear all\n\n"
@@ -536,7 +616,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/memory — what I know about you\n"
         "/clearmemory — reset\n\n"
         "/summary — today's recap\n\n"
-        "Just type anything to talk. I will help you log trades, track P&L, and stay on top of the markets."
+        "Just type anything to talk."
     )
     await reply(update, text)
 
@@ -655,6 +735,37 @@ async def cmd_clearmemory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[DB] clearmemory error: {e}")
     await reply(update, "Memory cleared. Fresh start.")
 
+async def cmd_calc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    summary_users[user_id] = update.message.chat_id
+    args = context.args
+    if not args or len(args) < 3:
+        await reply(update,
+            "Usage: /calc SYMBOL DIRECTION ENTRY\n\n"
+            "Examples:\n"
+            "  /calc MNQ long 21500\n"
+            "  /calc MGC short 3050.5\n"
+            "  /calc MES long 6000\n\n"
+            "Fixed rules: 1 contract, $50 SL, $100 TP (1:2)"
+        )
+        return
+    symbol    = args[0].upper()
+    direction = args[1].upper()
+    try:
+        entry = float(args[2])
+    except ValueError:
+        await reply(update, "Entry price must be a number. e.g. /calc MNQ long 21500")
+        return
+    if symbol not in CALC_SPECS:
+        supported = ", ".join(CALC_SPECS.keys())
+        await reply(update, f"{symbol} is not supported.\nSupported: {supported}")
+        return
+    if direction not in ("LONG", "BUY", "SHORT", "SELL"):
+        await reply(update, "Direction must be LONG or SHORT.")
+        return
+    result = calc_levels(symbol, entry, direction)
+    await reply(update, format_calc(result))
+
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     chat_id = update.message.chat_id
@@ -698,6 +809,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             repeat_label = "daily" if repeat == "daily" else "one-time"
             time_label   = fire_time.strftime("%I:%M %p")
             await reply(update, f"Reminder set.\n\n{task}\n{time_label} — {repeat_label}")
+            return
+
+    # ── Natural language calc detection ─────────────────
+    # Catches: "mnq long 21500", "long mgc at 3050", "short mes 6000"
+    words      = user_msg.upper().split()
+    calc_syms  = [w for w in words if w in CALC_SPECS]
+    calc_dirs  = [w for w in words if w in ("LONG", "SHORT", "BUY", "SELL")]
+    # Find a number that looks like a futures price (> 100)
+    calc_price = None
+    for w in words:
+        w_clean = w.replace(",", "")
+        try:
+            val = float(w_clean)
+            if val > 100:
+                calc_price = val
+                break
+        except ValueError:
+            pass
+    if calc_syms and calc_dirs and calc_price:
+        result = calc_levels(calc_syms[0], calc_price, calc_dirs[0])
+        if result:
+            await reply(update, format_calc(result))
             return
 
     # ── Price detection ──────────────────────────────────
@@ -766,6 +899,7 @@ app = (
 )
 
 app.add_handler(CommandHandler("start",          cmd_start))
+app.add_handler(CommandHandler("calc",           cmd_calc))
 app.add_handler(CommandHandler("trades",         cmd_trades))
 app.add_handler(CommandHandler("open",           cmd_open))
 app.add_handler(CommandHandler("pnl",            cmd_pnl))
