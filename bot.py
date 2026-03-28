@@ -1,173 +1,387 @@
 # -*- coding: utf-8 -*-
 import os
+import json
 import asyncio
 import base64
-import json
-import psycopg2
 import httpx
+import psycopg2
+import groq as groq_module
+from groq import Groq
 from datetime import datetime, timedelta
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
-from groq import Groq
-import groq as groq_module
+from telegram.ext import (
+    ApplicationBuilder, MessageHandler, CommandHandler,
+    filters, ContextTypes
+)
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-
+# ============================================================
+# ENV
+# ============================================================
+TELEGRAM_TOKEN = os.environ["8666756705:AAGf9EolzwKoAGu4UXho-aLkXBxmZepUVQc"]
+GROQ_API_KEY   = os.environ["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"]
+DATABASE_URL   = os.environ.get("postgresql://postgres:RLgFVaildRXzEYAKBAetJjJaCaPUbHSM@interchange.proxy.rlwy.net:45146/railway")
 client = Groq(api_key=GROQ_API_KEY)
 
 # ============================================================
-# PERSISTENT STORAGE HELPERS (PostgreSQL)
+# DATABASE
 # ============================================================
-def get_db():
-    db_url = os.environ.get("database") or os.environ.get("DATABASE_URL")
-    return psycopg2.connect(db_url, sslmode="require")
+def get_con():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def init_db():
-    con = get_db()
+    con = get_con()
     cur = con.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            role TEXT,
-            content TEXT,
+            id         SERIAL PRIMARY KEY,
+            user_id    BIGINT NOT NULL,
+            role       TEXT NOT NULL,
+            content    TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-    cur.execute("""
+        );
         CREATE TABLE IF NOT EXISTS user_facts (
-            user_id BIGINT PRIMARY KEY,
-            facts TEXT
-        )
-    """)
-    cur.execute("""
+            user_id    BIGINT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (user_id, key)
+        );
         CREATE TABLE IF NOT EXISTS summaries (
-            user_id BIGINT PRIMARY KEY,
-            summary TEXT
-        )
+            id         SERIAL PRIMARY KEY,
+            user_id    BIGINT NOT NULL,
+            summary    TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS trades (
+            id          SERIAL PRIMARY KEY,
+            user_id     BIGINT NOT NULL,
+            date        TEXT NOT NULL,
+            symbol      TEXT NOT NULL,
+            direction   TEXT NOT NULL,
+            qty         REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price  REAL,
+            pnl         REAL,
+            status      TEXT DEFAULT 'OPEN',
+            notes       TEXT,
+            created_at  TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS reminders (
+            id          SERIAL PRIMARY KEY,
+            user_id     BIGINT NOT NULL,
+            chat_id     BIGINT NOT NULL,
+            task        TEXT NOT NULL,
+            fire_time   TIMESTAMP NOT NULL,
+            repeat      TEXT DEFAULT 'none',
+            done        BOOLEAN DEFAULT FALSE,
+            created_at  TIMESTAMP DEFAULT NOW()
+        );
     """)
     con.commit()
     cur.close()
     con.close()
+    print("[DB] Initialized.")
 
+# ── messages ──────────────────────────────────────────────
 def append_message(user_id, role, content):
     try:
-        con = get_db()
+        con = get_con()
         cur = con.cursor()
-        cur.execute("INSERT INTO messages (user_id, role, content) VALUES (%s, %s, %s)", (user_id, role, content))
-        con.commit()
-        cur.close()
-        con.close()
+        cur.execute(
+            "INSERT INTO messages (user_id, role, content) VALUES (%s, %s, %s)",
+            (user_id, role, content)
+        )
+        con.commit(); cur.close(); con.close()
     except Exception as e:
-        print(f"append_message error: {e}")
+        print(f"[DB] append_message error: {e}")
 
 def get_recent_messages(user_id, limit=20):
     try:
-        con = get_db()
+        con = get_con()
         cur = con.cursor()
-        cur.execute(
-            "SELECT role, content FROM messages WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
-            (user_id, limit)
-        )
+        cur.execute("""
+            SELECT role, content FROM (
+                SELECT role, content, id FROM messages
+                WHERE user_id = %s ORDER BY id DESC LIMIT %s
+            ) sub ORDER BY id ASC
+        """, (user_id, limit))
         rows = cur.fetchall()
-        cur.close()
-        con.close()
-        return [{"role": r, "content": c} for r, c in reversed(rows)]
+        cur.close(); con.close()
+        return [{"role": r, "content": c} for r, c in rows]
     except Exception as e:
-        print(f"get_recent_messages error: {e}")
+        print(f"[DB] get_recent_messages error: {e}")
         return []
+
+# ── facts ─────────────────────────────────────────────────
+def save_facts(user_id, facts: dict):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        for k, v in facts.items():
+            cur.execute("""
+                INSERT INTO user_facts (user_id, key, value, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (user_id, key)
+                DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """, (user_id, k, str(v)))
+        con.commit(); cur.close(); con.close()
+    except Exception as e:
+        print(f"[DB] save_facts error: {e}")
 
 def get_all_facts(user_id):
     try:
-        con = get_db()
+        con = get_con()
         cur = con.cursor()
-        cur.execute("SELECT facts FROM user_facts WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        cur.close()
-        con.close()
-        return row[0] if row else ""
+        cur.execute("SELECT key, value FROM user_facts WHERE user_id = %s ORDER BY key", (user_id,))
+        rows = cur.fetchall()
+        cur.close(); con.close()
+        if not rows:
+            return ""
+        return "Known facts:\n" + "\n".join(f"- {k}: {v}" for k, v in rows)
     except Exception as e:
-        print(f"get_all_facts error: {e}")
+        print(f"[DB] get_all_facts error: {e}")
         return ""
+
+# ── summaries ─────────────────────────────────────────────
+def save_summary(user_id, summary):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("INSERT INTO summaries (user_id, summary) VALUES (%s, %s)", (user_id, summary))
+        con.commit(); cur.close(); con.close()
+    except Exception as e:
+        print(f"[DB] save_summary error: {e}")
 
 def get_latest_summary(user_id):
     try:
-        con = get_db()
+        con = get_con()
         cur = con.cursor()
-        cur.execute("SELECT summary FROM summaries WHERE user_id = %s", (user_id,))
+        cur.execute("SELECT summary FROM summaries WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
         row = cur.fetchone()
-        cur.close()
-        con.close()
+        cur.close(); con.close()
         return row[0] if row else ""
     except Exception as e:
-        print(f"get_latest_summary error: {e}")
+        print(f"[DB] get_latest_summary error: {e}")
         return ""
 
-def maybe_summarize(user_id, groq_client):
+def maybe_summarize(user_id):
     try:
-        con = get_db()
+        con = get_con()
         cur = con.cursor()
         cur.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s", (user_id,))
         count = cur.fetchone()[0]
-        cur.close()
-        con.close()
+        cur.close(); con.close()
         if count % 20 != 0:
             return
         history = get_recent_messages(user_id, limit=40)
-        text = "\n".join(f"{m['role']}: {m['content']}" for m in history)
-
-        # Extract facts
-        facts_resp = groq_client.chat.completions.create(
+        text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in history)
+        prev = get_latest_summary(user_id)
+        resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Extract key facts about the user from this conversation. Return a short bullet list. Only include stable facts (name, business, preferences, goals). No filler."},
-                {"role": "user", "content": text}
-            ],
-            max_tokens=300,
-        )
-        facts = facts_resp.choices[0].message.content.strip()
+            messages=[{"role": "user", "content": f"""Summarize this trading conversation and extract key facts about the user.
+Previous summary: {prev or 'None'}
+Conversation:
+{text}
 
-        # Summarize
-        sum_resp = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Summarize this conversation in 3-5 sentences. Focus on what was discussed and any decisions made."},
-                {"role": "user", "content": text}
-            ],
-            max_tokens=200,
+Respond ONLY in this JSON (no markdown):
+{{"summary": "...", "facts": {{"key": "value"}}}}"""}],
+            max_tokens=500
         )
-        summary = sum_resp.choices[0].message.content.strip()
-
-        con = get_db()
-        cur = con.cursor()
-        cur.execute("INSERT INTO user_facts (user_id, facts) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET facts = %s", (user_id, facts, facts))
-        cur.execute("INSERT INTO summaries (user_id, summary) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET summary = %s", (user_id, summary, summary))
-        con.commit()
-        cur.close()
-        con.close()
+        raw = resp.choices[0].message.content.strip()
+        parsed = json.loads(raw)
+        save_summary(user_id, parsed.get("summary", ""))
+        facts = {k: v for k, v in parsed.get("facts", {}).items() if v and v != "..."}
+        if facts:
+            save_facts(user_id, facts)
     except Exception as e:
-        print(f"maybe_summarize error: {e}")
+        print(f"[Memory] maybe_summarize error: {e}")
+
+# ── trades ────────────────────────────────────────────────
+def log_trade(user_id, date, symbol, direction, qty, entry_price, notes=""):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO trades (user_id, date, symbol, direction, qty, entry_price, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+        """, (user_id, date, symbol, direction, qty, entry_price, notes))
+        trade_id = cur.fetchone()[0]
+        con.commit(); cur.close(); con.close()
+        return trade_id
+    except Exception as e:
+        print(f"[DB] log_trade error: {e}")
+        return None
+
+def close_trade(user_id, trade_id, exit_price):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("SELECT direction, qty, entry_price FROM trades WHERE id = %s AND user_id = %s", (trade_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); con.close()
+            return None
+        direction, qty, entry = row
+        pnl = (exit_price - entry) * qty if direction == "BUY" else (entry - exit_price) * qty
+        cur.execute("""
+            UPDATE trades SET exit_price = %s, pnl = %s, status = 'CLOSED'
+            WHERE id = %s AND user_id = %s
+        """, (exit_price, pnl, trade_id, user_id))
+        con.commit(); cur.close(); con.close()
+        return pnl
+    except Exception as e:
+        print(f"[DB] close_trade error: {e}")
+        return None
+
+def get_trades(user_id, status=None):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        if status:
+            cur.execute("SELECT id, date, symbol, direction, qty, entry_price, exit_price, pnl, status, notes FROM trades WHERE user_id = %s AND status = %s ORDER BY id DESC", (user_id, status))
+        else:
+            cur.execute("SELECT id, date, symbol, direction, qty, entry_price, exit_price, pnl, status, notes FROM trades WHERE user_id = %s ORDER BY id DESC LIMIT 20", (user_id,))
+        rows = cur.fetchall()
+        cur.close(); con.close()
+        return rows
+    except Exception as e:
+        print(f"[DB] get_trades error: {e}")
+        return []
+
+def get_pnl_summary(user_id):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("SELECT COALESCE(SUM(pnl),0), COUNT(*) FROM trades WHERE user_id = %s AND status = 'CLOSED'", (user_id,))
+        total_pnl, closed = cur.fetchone()
+        cur.execute("SELECT COUNT(*) FROM trades WHERE user_id = %s AND pnl > 0", (user_id,))
+        wins = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM trades WHERE user_id = %s AND status = 'OPEN'", (user_id,))
+        open_count = cur.fetchone()[0]
+        cur.close(); con.close()
+        return total_pnl, closed, wins, open_count
+    except Exception as e:
+        print(f"[DB] get_pnl_summary error: {e}")
+        return 0, 0, 0, 0
+
+# ── reminders ─────────────────────────────────────────────
+def db_add_reminder(user_id, chat_id, task, fire_time, repeat):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO reminders (user_id, chat_id, task, fire_time, repeat)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (user_id, chat_id, task, fire_time, repeat))
+        con.commit(); cur.close(); con.close()
+    except Exception as e:
+        print(f"[DB] db_add_reminder error: {e}")
+
+def db_get_due_reminders():
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("SELECT id, user_id, chat_id, task, fire_time, repeat FROM reminders WHERE done = FALSE AND fire_time <= NOW()")
+        rows = cur.fetchall()
+        cur.close(); con.close()
+        return rows
+    except Exception as e:
+        print(f"[DB] db_get_due_reminders error: {e}")
+        return []
+
+def db_mark_reminder_done(reminder_id):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("UPDATE reminders SET done = TRUE WHERE id = %s", (reminder_id,))
+        con.commit(); cur.close(); con.close()
+    except Exception as e:
+        print(f"[DB] db_mark_reminder_done error: {e}")
+
+def db_reschedule_reminder(reminder_id, new_time):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("UPDATE reminders SET fire_time = %s WHERE id = %s", (new_time, reminder_id))
+        con.commit(); cur.close(); con.close()
+    except Exception as e:
+        print(f"[DB] db_reschedule_reminder error: {e}")
+
+def db_get_active_reminders(user_id):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("SELECT id, task, fire_time, repeat FROM reminders WHERE user_id = %s AND done = FALSE ORDER BY fire_time ASC", (user_id,))
+        rows = cur.fetchall()
+        cur.close(); con.close()
+        return rows
+    except Exception as e:
+        print(f"[DB] db_get_active_reminders error: {e}")
+        return []
+
+def db_clear_reminders(user_id):
+    try:
+        con = get_con()
+        cur = con.cursor()
+        cur.execute("UPDATE reminders SET done = TRUE WHERE user_id = %s AND done = FALSE", (user_id,))
+        con.commit(); cur.close(); con.close()
+    except Exception as e:
+        print(f"[DB] db_clear_reminders error: {e}")
 
 # ============================================================
-# IN-MEMORY STATE
+# FUTURES PRICES
 # ============================================================
-reminders      = []
-summary_users  = {}
-business_logs  = {}
-goals_data     = {}
-user_moods     = {}
-current_mode   = {}
+FUTURES_SYMBOLS = {
+    "MNQ":       ("MNQ=F",   "Micro Nasdaq Futures",    "USD"),
+    "MGC":       ("MGC=F",   "Micro Gold Futures",      "USD"),
+    "MES":       ("MES=F",   "Micro S&P 500 Futures",   "USD"),
+    "MCL":       ("MCL=F",   "Micro Crude Oil Futures", "USD"),
+    "NQ":        ("NQ=F",    "Nasdaq Futures",          "USD"),
+    "ES":        ("ES=F",    "S&P 500 Futures",         "USD"),
+    "GC":        ("GC=F",    "Gold Futures",            "USD"),
+    "CL":        ("CL=F",    "Crude Oil Futures",       "USD"),
+    "NIFTY":     ("^NSEI",   "Nifty 50",                "INR"),
+    "BANKNIFTY": ("^NSEBANK","Bank Nifty",              "INR"),
+    "SENSEX":    ("^BSESN",  "BSE Sensex",              "INR"),
+}
 
-def get_business_log(user_id):
-    if user_id not in business_logs:
-        business_logs[user_id] = {"hostel": [], "freight": [], "trading": []}
-    return business_logs[user_id]
+async def get_price(symbol: str) -> str:
+    try:
+        import yfinance as yf
+        sym_upper = symbol.upper()
+        ticker_sym, name, currency = FUTURES_SYMBOLS.get(sym_upper, (sym_upper, sym_upper, "USD"))
+        ticker = yf.Ticker(ticker_sym)
+        info = ticker.fast_info
+        price = getattr(info, "last_price", None)
+        prev  = getattr(info, "previous_close", None)
+        if not price:
+            return f"Could not find price for {symbol}. Check the symbol."
+        change     = price - prev if prev else 0
+        change_pct = (change / prev * 100) if prev else 0
+        direction  = "+" if change >= 0 else ""
+        lines = [
+            f"{sym_upper} — {name}",
+            f"Price:  {currency} {price:,.2f}",
+            f"Change: {direction}{change:,.2f} ({direction}{change_pct:.2f}%)",
+            f"Note: 15 min delayed",
+        ]
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[Price] error: {e}")
+        return "Could not fetch price right now. Try again in a moment."
 
-def get_goals(user_id):
-    if user_id not in goals_data:
-        goals_data[user_id] = {"goals": [], "completed_today": []}
-    return goals_data[user_id]
+# ============================================================
+# REMINDER PARSER
+# ============================================================
+REMINDER_PARSE_PROMPT = """You are a reminder time parser. Extract the reminder from the user message.
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "is_reminder": true or false,
+  "task": "what to remind about",
+  "time_str": "HH:MM in 24hr format or null",
+  "delay_minutes": number or null,
+  "repeat": "none" or "daily"
+}"""
 
 async def parse_reminder(text):
     try:
@@ -177,628 +391,364 @@ async def parse_reminder(text):
                 {"role": "system", "content": REMINDER_PARSE_PROMPT},
                 {"role": "user",   "content": text}
             ],
-            max_tokens=200,
+            max_tokens=150
         )
-        raw = resp.choices[0].message.content.strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
+        raw = resp.choices[0].message.content.strip().replace("```json","").replace("```","")
         return json.loads(raw)
     except Exception as e:
-        print(f"parse_reminder error: {e}")
+        print(f"[Reminder] parse error: {e}")
         return {"is_reminder": False}
 
 # ============================================================
-# IN-MEMORY STATE
+# SYSTEM PROMPT
 # ============================================================
-user_moods = {}
-current_mode = {}
+SYSTEM_PROMPT = """You are SARA, a sharp and reliable trading assistant for Harsheet Garg, a futures trader from Indore.
 
-# ============================================================
-# SYSTEM PROMPTS
-# ============================================================
-SARA_BASE = (
-    "You are SARA, a smart and reliable personal assistant to Harsheet Garg, a 24-year-old businessman from Indore. "
-    "Always address him as Harsheet.\n\n"
-    "YOUR PERSONALITY:\n"
-    "- You are calm, clear, and genuinely helpful. You sound like a real person, not a corporate chatbot.\n"
-    "- You are warm and supportive without being over the top. When things go well, you acknowledge it simply. When things are hard, you are honest and steady.\n"
-    "- You keep your replies concise and to the point. No unnecessary filler, no essays.\n"
-    "- You are direct. You do not say 'certainly' or 'of course' or 'I would be happy to help'.\n"
-    "- You can be lightly playful when the moment calls for it, but you never force it.\n"
-    "- Occasionally you can throw in natural Hindi phrases like: bhai, yaar, kya scene hai, chill kar, sahi hai, ekdum solid — only when it feels natural.\n"
-    "- You are sharp and capable, but you do not show off. You just get things done."
-)
+YOUR PERSONALITY:
+- Calm, direct, and genuinely helpful. You sound like a real person, not a bot.
+- Warm but not over the top. Keep replies concise and to the point.
+- You know markets well. You speak trading naturally.
+- Occasionally use natural Hindi like: bhai, yaar, sahi hai — only when it fits.
+- Never say "certainly", "of course", or "I would be happy to help".
+- You care about Harsheet's trading discipline and risk management.
 
-HOSTEL_PROMPT = (
-    SARA_BASE +
-    "\n\nMODE: HOSTEL (Shree Sainath Boys Hostel)\n"
-    "Help Harsheet manage:\n"
-    "- RENT: who has paid, who is pending, amounts\n"
-    "- ROOMS: occupied, vacant\n"
-    "- COMPLAINTS: log maintenance issues\n"
-    "When something is logged, confirm it clearly and briefly. Keep the books clean."
-)
+WHAT YOU HELP WITH:
+- Logging trades (buy/sell entries and exits)
+- Tracking P&L across trades
+- Price checks on futures symbols
+- Setting reminders and market alerts
+- Daily trading summaries
+- General trading conversation and analysis
 
-FREIGHT_PROMPT = (
-    SARA_BASE +
-    "\n\nMODE: FREIGHT (Nitin Freight Carriers)\n\n"
-    "BUSINESS MODEL - understand this thoroughly:\n"
-    "Harsheet is a freight broker for RM Phosphate Chemicals.\n"
-    "- Material: Khaad (fertilizer / phosphate chemical)\n"
-    "- Route: Dewas, MP to various destinations across MP\n"
-    "- RM Phosphate pays Harsheet a rate per tonne (his income)\n"
-    "- Harsheet books trucks at a lower rate per tonne (his cost) - the difference is his margin\n"
-    "- A commission is deducted per trip as a fixed flat amount (varies per trip)\n"
-    "- Driver payment: ADVANCE paid before loading + BALANCE paid after delivery\n"
-    "- RM Phosphate settles Harsheet's payment weekly or monthly\n\n"
-    "PROFIT FORMULA:\n"
-    "  Total Freight = truck rate x weight in MT\n"
-    "  Gross Margin = (RM rate - truck rate) x weight\n"
-    "  Net Profit = Gross Margin - commission\n\n"
-    "TRIP LOGGING FLOW - follow this exact order, ask ONE question at a time, wait for the answer before moving on:\n"
-    "Step 1: What is the date of this trip?\n"
-    "Step 2: Which transport company or transporter name?\n"
-    "Step 3: What is the truck number?\n"
-    "Step 4: What is the destination?\n"
-    "Step 5: What is the truck rate in rupees per tonne?\n"
-    "Step 6: What is the total weight in MT?\n\n"
-    "After step 6, automatically calculate and clearly show:\n"
-    "  Total Freight = truck rate x weight\n\n"
-    "Step 7: Was any advance paid to the driver? If yes, how much?\n"
-    "  If advance given: Balance Freight = Total Freight - Advance\n"
-    "  If no advance: full total freight is the balance due\n\n"
-    "Then show the complete trip summary and ask: Should I save this?\n"
-    "Only save to memory after Harsheet confirms yes.\n\n"
-    "BALANCE PAYMENT UPDATE:\n"
-    "When Harsheet says balance is paid for a truck or transporter:\n"
-    "- Mark that trip balance as PAID\n"
-    "- Never auto-mark as paid - only update when Harsheet explicitly tells you\n"
-    "- Confirm clearly that the balance has been marked paid and the books updated\n\n"
-    "SUMMARY COMMANDS:\n"
-    "- new trip: start the step-by-step trip logging flow\n"
-    "- trip summary: show all trips with freight, advance, and balance status\n"
-    "- pending balances: show only trips where driver balance is still due\n"
-    "- total trips: how many trips logged\n"
-    "- profit summary: show margin and net profit per trip\n\n"
-    "Always save complete trip details to memory. Keep the books accurate."
-)
+TRADE LOGGING:
+When Harsheet wants to log a trade, collect these details one at a time:
+1. Symbol (e.g. MNQ, MGC)
+2. Direction (BUY or SELL)
+3. Quantity (number of contracts)
+4. Entry price
+5. Date (today if not specified)
+6. Any notes (optional)
+Then confirm and tell him to use /logtrade to save it, or extract the details and confirm.
 
-TRADING_PROMPT = (
-    SARA_BASE +
-    "\n\nMODE: TRADING (KenshoWorld)\n"
-    "Help Harsheet manage:\n"
-    "- ORDERS: buy and sell orders\n"
-    "- P&L: profit and loss notes\n"
-    "- REMINDERS: market alerts\n"
-    "Be precise and useful. You know your way around markets."
-)
+When he closes a trade, ask for the exit price and calculate P&L automatically.
 
-PERSONAL_PROMPT = (
-    SARA_BASE +
-    "\n\nMODE: PERSONAL\n"
-    "Just be there for Harsheet. Talk about whatever is on his mind.\n"
-    "Be real with him. Check in, support him, push back when needed - like a trusted friend would."
-)
+COMMANDS AVAILABLE TO HARSHEET:
+/trades - view recent trades
+/open - view open positions
+/pnl - P&L summary
+/price SYMBOL - get futures price
+/reminders - view active reminders
+/clearreminders - clear all reminders
+/memory - what you know about him
+/clearmemory - reset memory
+/summary - today's trading recap
 
-REMINDER_PARSE_PROMPT = (
-    "You are a reminder parser. Extract reminder details from the user message and return ONLY a JSON object with no extra text.\n\n"
-    "JSON format:\n"
-    "{\n"
-    '  "is_reminder": true or false,\n'
-    '  "task": "what to remind about",\n'
-    '  "time_str": "HH:MM in 24hr format or null",\n'
-    '  "repeat": "none" or "daily",\n'
-    '  "delay_minutes": number or null,\n'
-    '  "business": "hostel or freight or trading or personal or null"\n'
-    "}\n\n"
-    "Return valid JSON only. No explanation."
-)
+Always be honest about market risks. Keep the books accurate."""
 
 # ============================================================
-# HELPERS
+# BACKGROUND LOOPS
 # ============================================================
-def detect_mood(message):
-    msg = message.lower()
-    if any(w in msg for w in ["sad", "upset", "crying", "depressed", "down", "heartbroken", "lonely"]):
-        return "sad"
-    elif any(w in msg for w in ["angry", "frustrated", "pissed", "annoyed", "mad", "furious"]):
-        return "angry"
-    elif any(w in msg for w in ["anxious", "stressed", "nervous", "worried", "panic", "scared", "overwhelmed"]):
-        return "anxious"
-    elif any(w in msg for w in ["tired", "exhausted", "sleepy", "drained", "dead"]):
-        return "tired"
-    elif any(w in msg for w in ["happy", "excited", "great", "amazing", "awesome", "yay", "slay"]):
-        return "happy"
-    return "neutral"
-
-
-def get_mood_instruction(mood):
-    return {
-        "sad":     "\n\n[Harsheet seems to be going through something difficult. Be genuine and steady with him. Drop the business tone, just be a real presence.]",
-        "angry":   "\n\n[Harsheet is frustrated. Acknowledge it, stay calm, and be on his side without escalating.]",
-        "anxious": "\n\n[Harsheet is anxious or stressed. Be grounding and reassuring. Keep things clear and calm.]",
-        "tired":   "\n\n[Harsheet is exhausted. Be gentle, brief, and tell him to rest if it makes sense.]",
-        "happy":   "\n\n[Harsheet is in a good mood. Match the energy naturally - be warm and positive.]",
-    }.get(mood, "")
-
-
-# ============================================================
-# CRYPTO & FUTURES
-# ============================================================
-async def get_crypto_price(symbol: str) -> str:
-    try:
-        async with httpx.AsyncClient() as c:
-            usd = (await c.get(f"https://api.coinlore.net/api/ticker/?id={symbol}", timeout=5)).json()[0]
-            inr = (await c.get(f"https://api.coinlore.net/api/ticker/?id={symbol}&convert=INR", timeout=5)).json()[0]
-            price_usd = usd.get("price", 0)
-            price_inr = inr.get("price", 0)
-            change_24h = usd.get("percentage_change_24h", 0)
-            direction = "up" if change_24h >= 0 else "down"
-            mood = "looking good" if change_24h >= 2 else ("down today" if change_24h <= -2 else "fairly flat")
-            return (
-                f"{symbol} - {mood} ({direction})\n"
-                f"${price_usd:,.2f} USD\n"
-                f"Rs. {price_inr:,.0f} INR\n"
-                f"24h change: {change_24h:+.2f}%"
-            )
-        return f"Could not find {symbol}. Please check the symbol."
-    except Exception as e:
-        print(f"Crypto error: {e}")
-        return "Having trouble pulling that price right now. Try again in a moment."
-
-
-FUTURES_SYMBOLS = {
-    "MNQ": ("MNQ=F", "Micro Nasdaq Futures", "USD"),
-    "MGC": ("MGC=F", "Micro Gold Futures", "USD"),
-    "MES": ("MES=F", "Micro S&P 500 Futures", "USD"),
-    "MCL": ("MCL=F", "Micro Crude Oil Futures", "USD"),
-    "M6E": ("M6E=F", "Micro EUR/USD Futures", "USD"),
-    "MBT": ("MBT=F", "Micro Bitcoin Futures", "USD"),
-    "NIFTY": ("^NSEI", "Nifty 50", "INR"),
-    "BANKNIFTY": ("^NSEBANK", "Bank Nifty", "INR"),
-    "SENSEX": ("^BSESN", "BSE Sensex", "INR"),
-    "GOLD": ("GC=F", "Gold Futures", "USD"),
-    "SILVER": ("SI=F", "Silver Futures", "USD"),
-    "CRUDEOIL": ("CL=F", "Crude Oil Futures", "USD"),
-}
-
-async def get_futures_price(symbol: str) -> str:
-    try:
-        import yfinance as yf
-        ticker_sym, name, currency = FUTURES_SYMBOLS.get(symbol, (symbol, symbol, "USD"))
-        ticker = yf.Ticker(ticker_sym)
-        info = ticker.fast_info
-        price = getattr(info, "last_price", None)
-        prev = getattr(info, "previous_close", None)
-        if price:
-            change = price - prev
-            change_pct = (change / prev * 100) if prev else 0
-            direction = "up" if change >= 0 else "down"
-            price_inr = price * 83.5
-            mood = "solid session" if change_pct >= 1 else ("rough day" if change_pct <= -1 else "sideways")
-            return (
-                f"{symbol} - {mood} ({direction})\n"
-                f"{name}\n"
-                f"${price:,.2f} {currency}\n"
-                f"Rs. {price_inr:,.0f} INR (approx)\n"
-                f"Change: {change:+.2f} ({change_pct:+.2f}%)\n"
-                f"Note: 15 min delayed"
-            )
-        return f"Could not pull {symbol} right now."
-    except Exception as e:
-        print(f"Futures error: {e}")
-        return "Market data is unavailable right now. Try again shortly."
-
-
-def schedule_reminder(user_id, chat_id, task, fire_time, repeat, business):
-    reminders.append({
-        "user_id": user_id,
-        "chat_id": chat_id,
-        "task": task,
-        "fire_time": fire_time,
-        "repeat": repeat,
-        "business": business,
-        "done": False,
-    })
-
+summary_users = {}  # user_id -> chat_id
 
 async def reminder_loop(bot):
     while True:
-        now = datetime.now()
-        for r in reminders:
-            if r["done"]:
-                continue
-            if now >= r["fire_time"].replace(second=0, microsecond=0):
+        try:
+            due = db_get_due_reminders()
+            for rid, uid, cid, task, fire_time, repeat in due:
                 try:
                     await bot.send_message(
-                        chat_id=r["chat_id"],
-                        text="Reminder for you, Harsheet:\n\n" + r["task"]
+                        chat_id=cid,
+                        text=f"Reminder, Harsheet:\n\n{task}"
                     )
                 except Exception as e:
-                    print(f"Reminder send error: {e}")
-                if r["repeat"] == "daily":
-                    r["fire_time"] += timedelta(days=1)
+                    print(f"[Reminder] send error: {e}")
+                if repeat == "daily":
+                    db_reschedule_reminder(rid, fire_time + timedelta(days=1))
                 else:
-                    r["done"] = True
+                    db_mark_reminder_done(rid)
+        except Exception as e:
+            print(f"[Reminder loop] error: {e}")
         await asyncio.sleep(30)
-
 
 async def daily_summary_loop(bot):
     while True:
-        now = datetime.now()
-        if now.hour == 8 and now.minute == 0:
-            today = now.strftime("%A, %d %B %Y")
-            for uid, cid in list(summary_users.items()):
-                await send_daily_summary(bot, uid, cid, today)
-            await asyncio.sleep(61)
+        try:
+            now = datetime.now()
+            if now.hour == 8 and now.minute == 0:
+                for uid, cid in list(summary_users.items()):
+                    await send_daily_summary(bot, uid, cid)
+                await asyncio.sleep(70)
+        except Exception as e:
+            print(f"[Summary loop] error: {e}")
         await asyncio.sleep(30)
 
+async def send_daily_summary(bot, user_id, chat_id):
+    today = datetime.now().strftime("%A, %d %B %Y")
+    total_pnl, closed, wins, open_count = get_pnl_summary(user_id)
+    open_trades = get_trades(user_id, status="OPEN")
+    losses = closed - wins if closed > 0 else 0
+    win_rate = (wins / closed * 100) if closed > 0 else 0
 
-async def send_daily_summary(bot, user_id, chat_id, today):
-    logs = get_business_log(user_id)
-    goals = get_goals(user_id)
+    lines = [
+        f"Good morning, Harsheet. Trading recap — {today}\n",
+        f"Overall P&L:   {'+ ' if total_pnl >= 0 else ''}{total_pnl:,.2f}",
+        f"Closed trades: {closed}  (W: {wins}  L: {losses}  Win rate: {win_rate:.0f}%)",
+        f"Open positions: {open_count}",
+    ]
 
-    lines = ["Good morning, Harsheet. Here is your daily recap for " + today + ".\n"]
+    if open_trades:
+        lines.append("\nOpen positions:")
+        for t in open_trades[:5]:
+            tid, date, sym, direction, qty, entry, exit_p, pnl, status, notes = t
+            lines.append(f"  #{tid} {sym} {direction} x{qty} @ {entry}")
 
-    lines.append("HOSTEL - Shree Sainath")
-    if logs["hostel"]:
-        for e in logs["hostel"][-5:]:
-            lines.append("  [" + e["time"] + "] " + e["entry"])
-    else:
-        lines.append("  No activity logged.")
+    active_rem = db_get_active_reminders(user_id)
+    lines.append(f"\nActive reminders: {len(active_rem)}")
+    lines.append("\nHave a focused session today.")
 
-    lines.append("\nFREIGHT - Nitin Carriers")
-    if logs["freight"]:
-        for e in logs["freight"][-5:]:
-            lines.append("  [" + e["time"] + "] " + e["entry"])
-    else:
-        lines.append("  No trips logged.")
-
-    lines.append("\nTRADING - KenshoWorld")
-    if logs["trading"]:
-        for e in logs["trading"][-5:]:
-            lines.append("  [" + e["time"] + "] " + e["entry"])
-    else:
-        lines.append("  No trades logged.")
-
-    lines.append("\nGOALS")
-    active_goals = [g for g in goals["goals"] if not g.get("done")]
-    if active_goals:
-        for g in active_goals[:5]:
-            lines.append("  - " + g["goal"])
-    else:
-        lines.append("  No active goals. Use /addgoal to add one.")
-
-    completed = goals.get("completed_today", [])
-    if completed:
-        lines.append("\nCompleted yesterday: " + ", ".join(completed))
-
-    active_rem = [r for r in reminders if r["user_id"] == user_id and not r["done"]]
-    lines.append("\nActive reminders: " + str(len(active_rem)))
-    lines.append("\nHave a productive day.")
-
-    business_logs[user_id] = {"hostel": [], "freight": [], "trading": []}
-    goals_data[user_id]["completed_today"] = []
-
-    await bot.send_message(chat_id=chat_id, text="\n".join(lines))
-
+    try:
+        await bot.send_message(chat_id=chat_id, text="\n".join(lines))
+    except Exception as e:
+        print(f"[Summary] send error: {e}")
 
 # ============================================================
 # COMMANDS
 # ============================================================
-async def send_reply(update, reply_text):
-    await update.message.reply_text(reply_text)
-
+async def reply(update, text):
+    await update.message.reply_text(text)
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    reply = (
-        "Hey Harsheet, I am SARA - your personal assistant. Here is what I can do:\n\n"
-        "MODES:\n"
-        "/personal - personal conversations\n"
-        "/hostel - Shree Sainath Boys Hostel\n"
-        "/freight - Nitin Freight Carriers\n"
-        "/trading - KenshoWorld\n\n"
-        "REMINDERS:\n"
-        "/reminders - see active reminders\n"
-        "/clearreminders - clear all reminders\n\n"
-        "GOALS:\n"
-        "/goals - view your goals\n"
-        "/addgoal - add a goal\n"
-        "/donegoal - mark a goal done\n\n"
+    text = (
+        "Hey Harsheet, I am SARA — your trading assistant.\n\n"
+        "TRADES:\n"
+        "/trades — recent trades\n"
+        "/open — open positions\n"
+        "/pnl — P&L summary\n\n"
         "PRICES:\n"
-        "/price BTC - crypto price\n"
-        "/price MNQ - futures price\n\n"
+        "/price MNQ — futures price\n"
+        "/price MGC — gold price\n\n"
+        "REMINDERS:\n"
+        "/reminders — active reminders\n"
+        "/clearreminders — clear all\n\n"
         "MEMORY:\n"
-        "/memory - what I know about you\n"
-        "/clearmemory - reset memory\n\n"
-        "/summary - today's recap\n\n"
-        "Daily summary drops at 8am.\n"
-        "Just type anything to get started."
+        "/memory — what I know about you\n"
+        "/clearmemory — reset\n\n"
+        "/summary — today's recap\n\n"
+        "Just type anything to talk. I will help you log trades, track P&L, and stay on top of the markets."
     )
-    await update.message.reply_text(reply)
+    await reply(update, text)
 
-
-async def cmd_personal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    current_mode[user_id] = "personal"
-    await send_reply(update, "Switched to personal mode. How are you doing, Harsheet?")
+    trades = get_trades(user_id)
+    if not trades:
+        await reply(update, "No trades logged yet. Tell me about a trade and I will help you record it.")
+        return
+    lines = ["Recent trades:\n"]
+    for t in trades:
+        tid, date, sym, direction, qty, entry, exit_p, pnl, status, notes = t
+        if status == "CLOSED":
+            pnl_str = f"  P&L: {'+ ' if pnl >= 0 else ''}{pnl:,.2f}"
+        else:
+            pnl_str = "  Status: OPEN"
+        lines.append(f"#{tid} [{date}] {sym} {direction} x{qty} @ {entry}{pnl_str}")
+    await reply(update, "\n".join(lines))
 
-
-async def cmd_hostel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    current_mode[user_id] = "hostel"
-    await send_reply(update, "Hostel mode. What do you need?")
+    trades = get_trades(user_id, status="OPEN")
+    if not trades:
+        await reply(update, "No open positions right now.")
+        return
+    lines = ["Open positions:\n"]
+    for t in trades:
+        tid, date, sym, direction, qty, entry, exit_p, pnl, status, notes = t
+        lines.append(f"#{tid} [{date}] {sym} {direction} x{qty} @ {entry}")
+        if notes:
+            lines.append(f"   Note: {notes}")
+    await reply(update, "\n".join(lines))
 
-
-async def cmd_freight(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    current_mode[user_id] = "freight"
-    await send_reply(update, "Freight mode. Say 'new trip' to log one, or ask me anything about the books.")
+    total_pnl, closed, wins, open_count = get_pnl_summary(user_id)
+    losses   = closed - wins if closed > 0 else 0
+    win_rate = (wins / closed * 100) if closed > 0 else 0
+    sign     = "+ " if total_pnl >= 0 else ""
+    lines = [
+        "P&L Summary\n",
+        f"Total P&L:   {sign}{total_pnl:,.2f}",
+        f"Closed:      {closed}",
+        f"Wins:        {wins}",
+        f"Losses:      {losses}",
+        f"Win rate:    {win_rate:.1f}%",
+        f"Open now:    {open_count}",
+    ]
+    recent = get_trades(user_id, status="CLOSED")[:5]
+    if recent:
+        lines.append("\nLast 5 closed trades:")
+        for t in recent:
+            tid, date, sym, direction, qty, entry, exit_p, pnl, status, notes = t
+            sign2 = "+ " if pnl >= 0 else ""
+            lines.append(f"  #{tid} {sym} {direction} — {sign2}{pnl:,.2f}")
+    await reply(update, "\n".join(lines))
 
-
-async def cmd_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     summary_users[user_id] = update.message.chat_id
-    current_mode[user_id] = "trading"
-    await send_reply(update, "Trading mode. What are we looking at?")
-
+    args = context.args
+    if not args:
+        syms = ", ".join(FUTURES_SYMBOLS.keys())
+        await reply(update, f"Which symbol? e.g. /price MNQ\n\nAvailable: {syms}")
+        return
+    symbol = args[0].upper()
+    await update.message.reply_text(f"Checking {symbol}...")
+    result = await get_price(symbol)
+    await reply(update, result)
 
 async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    active = [r for r in reminders if r["user_id"] == user_id and not r["done"]]
+    summary_users[user_id] = update.message.chat_id
+    active = db_get_active_reminders(user_id)
     if not active:
-        await send_reply(update, "No active reminders right now.")
+        await reply(update, "No active reminders.")
         return
-    lines = ["Your reminders:\n"]
-    for i, r in enumerate(active, 1):
-        repeat_label = "daily" if r["repeat"] == "daily" else "one-time"
-        lines.append(str(i) + ". " + r["task"] + "\n   " + r["fire_time"].strftime("%I:%M %p") + " - " + repeat_label)
-    await send_reply(update, "\n".join(lines))
-
+    lines = ["Active reminders:\n"]
+    for i, (rid, task, fire_time, repeat) in enumerate(active, 1):
+        repeat_label = "daily" if repeat == "daily" else "one-time"
+        lines.append(f"{i}. {task}\n   {fire_time.strftime('%d %b %I:%M %p')} — {repeat_label}")
+    await reply(update, "\n".join(lines))
 
 async def cmd_clearreminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    count = sum(1 for r in reminders if r["user_id"] == user_id and not r["done"])
-    for r in reminders:
-        if r["user_id"] == user_id:
-            r["done"] = True
-    await send_reply(update, "Cleared " + str(count) + " reminder(s).")
-
-
-async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await send_reply(update, "Which symbol should I check?\nCrypto: /price BTC\nFutures: /price MNQ")
-        return
-    symbol = args[0].upper()
-    await update.message.reply_text("Checking " + symbol + "...")
-    CRYPTO_LIST = {"BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "ADA", "MATIC", "DOT", "LTC", "SHIB", "AVAX"}
-    if symbol in FUTURES_SYMBOLS or symbol not in CRYPTO_LIST:
-        result = await get_futures_price(symbol)
-    else:
-        result = await get_crypto_price(symbol)
-    await send_reply(update, result)
-
-
-async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    goals = get_goals(user_id)
-    active = [g for g in goals["goals"] if not g.get("done")]
-    done = [g for g in goals["goals"] if g.get("done")]
-    if not active and not done:
-        await send_reply(update, "No goals yet. Use /addgoal to add one.")
-        return
-    lines = ["Your goals:\n"]
-    for i, g in enumerate(active, 1):
-        lines.append(str(i) + ". [ ] " + g["goal"])
-    for g in done[-3:]:
-        lines.append("[done] " + g["goal"])
-    lines.append("\nUse /donegoal <number> to mark one complete.")
-    await send_reply(update, "\n".join(lines))
-
-
-async def cmd_addgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not context.args:
-        await send_reply(update, "What is the goal? e.g. /addgoal read 10 pages daily")
-        return
-    goal_text = " ".join(context.args)
-    goals = get_goals(user_id)
-    goals["goals"].append({"goal": goal_text, "done": False, "added": datetime.now().strftime("%d %b")})
-    await send_reply(update, "Goal added:\n\n'" + goal_text + "'")
-
-
-async def cmd_donegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not context.args or not context.args[0].isdigit():
-        await send_reply(update, "Send the goal number. e.g. /donegoal 1")
-        return
-    idx = int(context.args[0]) - 1
-    goals = get_goals(user_id)
-    active = [g for g in goals["goals"] if not g.get("done")]
-    if idx < 0 or idx >= len(active):
-        await send_reply(update, "That number does not match any active goal.")
-        return
-    active[idx]["done"] = True
-    goals["completed_today"].append(active[idx]["goal"])
-    await send_reply(update, "Marked done: '" + active[idx]["goal"] + "'. Well done.")
-
+    db_clear_reminders(user_id)
+    await reply(update, "All reminders cleared.")
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    facts = get_all_facts(user_id)
+    facts   = get_all_facts(user_id)
     summary = get_latest_summary(user_id)
     if not facts and not summary:
-        await send_reply(update, "I do not have much on you yet. Keep chatting and I will start building a picture.")
+        await reply(update, "No memory yet. Keep chatting and I will start building a picture of your trading style.")
         return
     lines = ["Here is what I know about you, Harsheet:\n"]
     if facts:
         lines.append(facts)
     if summary:
-        lines.append("\nConversation summary:\n" + summary)
-    await send_reply(update, "\n".join(lines))
-
+        lines.append(f"\nRecent context:\n{summary}")
+    await reply(update, "\n".join(lines))
 
 async def cmd_clearmemory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import os
     user_id = update.message.from_user.id
     try:
-        db_url = os.environ.get("database") or os.environ.get("DATABASE_URL")
-        con = psycopg2.connect(db_url, sslmode="require")
+        con = get_con()
         cur = con.cursor()
         cur.execute("DELETE FROM user_facts WHERE user_id = %s", (user_id,))
         cur.execute("DELETE FROM summaries WHERE user_id = %s", (user_id,))
         cur.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
-        con.commit()
-        cur.close()
-        con.close()
+        con.commit(); cur.close(); con.close()
     except Exception as e:
-        print(f"Clear memory error: {e}")
-    current_mode.pop(user_id, None)
-    await send_reply(update, "Memory cleared. Fresh start.")
-
+        print(f"[DB] clearmemory error: {e}")
+    await reply(update, "Memory cleared. Fresh start.")
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     chat_id = update.message.chat_id
-    today = datetime.now().strftime("%A, %d %B %Y")
+    summary_users[user_id] = chat_id
     await update.message.reply_text("Pulling your recap...")
-    await send_daily_summary(context.bot, user_id, chat_id, today)
-
+    await send_daily_summary(context.bot, user_id, chat_id)
 
 # ============================================================
 # MAIN MESSAGE HANDLER
 # ============================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    chat_id = update.message.chat_id
-    user_message = update.message.text
-    mode = current_mode.get(user_id, "personal")
+    user_id     = update.message.from_user.id
+    chat_id     = update.message.chat_id
+    user_msg    = update.message.text
     summary_users[user_id] = chat_id
 
-    # --- Reminder detection ---
-    reminder_keywords = ["remind", "reminder", "alert", "notify", "every day", "daily at", "dont let me forget", "ping me"]
-    if any(kw in user_message.lower() for kw in reminder_keywords):
-        parsed = await parse_reminder(user_message)
+    # ── Reminder detection ───────────────────────────────
+    reminder_kw = ["remind", "reminder", "alert", "notify", "ping me", "don't let me forget",
+                   "dont let me forget", "every day", "daily at"]
+    if any(kw in user_msg.lower() for kw in reminder_kw):
+        parsed = await parse_reminder(user_msg)
         if parsed.get("is_reminder"):
-            now = datetime.now()
+            now       = datetime.now()
             fire_time = None
             if parsed.get("delay_minutes"):
-                fire_time = now + timedelta(minutes=parsed["delay_minutes"])
+                fire_time = now + timedelta(minutes=int(parsed["delay_minutes"]))
             elif parsed.get("time_str"):
-                t = datetime.strptime(parsed["time_str"], "%H:%M").replace(
-                    year=now.year, month=now.month, day=now.day
-                )
-                fire_time = t
-            if fire_time:
-                if fire_time <= now:
-                    fire_time += timedelta(days=1)
-            else:
-                await send_reply(update, "When should I remind you? Say something like 'at 5pm' or 'in 20 minutes'.")
+                try:
+                    t = datetime.strptime(parsed["time_str"], "%H:%M")
+                    fire_time = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+                    if fire_time <= now:
+                        fire_time += timedelta(days=1)
+                except Exception:
+                    pass
+            if not fire_time:
+                await reply(update, "When should I remind you? Say something like 'at 3pm' or 'in 30 minutes'.")
                 return
-            business = parsed.get("business") or mode
             repeat = parsed.get("repeat", "none")
-            task = parsed.get("task", user_message)
-            schedule_reminder(user_id, chat_id, task, fire_time, repeat, business)
+            task   = parsed.get("task", user_msg)
+            db_add_reminder(user_id, chat_id, task, fire_time, repeat)
             repeat_label = "daily" if repeat == "daily" else "one-time"
-            time_label = "in " + str(parsed["delay_minutes"]) + " mins" if parsed.get("delay_minutes") else fire_time.strftime("%I:%M %p")
-            await send_reply(update, "Reminder set.\n\n" + task + "\n" + time_label + " - " + repeat_label)
+            time_label   = fire_time.strftime("%I:%M %p")
+            await reply(update, f"Reminder set.\n\n{task}\n{time_label} — {repeat_label}")
             return
 
-    # --- Crypto & Futures price detection ---
-    CRYPTO_LIST = {"BTC", "ETH", "SOL", "BNB", "DOGE", "XRP", "ADA", "MATIC", "DOT", "LTC", "SHIB", "AVAX"}
-    FUTURES_LIST = set(FUTURES_SYMBOLS.keys())
-    all_symbols = CRYPTO_LIST | FUTURES_LIST
-    found_symbols = [w for w in user_message.upper().split() if w in all_symbols]
-    price_words = ["price", "rate", "cost", "how much", "kitna", "check"]
-    if found_symbols and any(pw in user_message.lower() for pw in price_words):
-        sym = found_symbols[0]
-        await update.message.reply_text("Checking " + sym + "...")
-        result = await get_futures_price(sym) if sym in FUTURES_LIST else await get_crypto_price(sym)
-        await send_reply(update, result)
+    # ── Price detection ──────────────────────────────────
+    words = user_msg.upper().split()
+    found = [w for w in words if w in FUTURES_SYMBOLS]
+    price_kw = ["price", "rate", "how much", "check", "kitna", "quote"]
+    if found and any(pw in user_msg.lower() for pw in price_kw):
+        await update.message.reply_text(f"Checking {found[0]}...")
+        result = await get_price(found[0])
+        await reply(update, result)
         return
 
-    # --- Main AI response ---
+    # ── Trade close detection ────────────────────────────
+    close_kw = ["closed", "exited", "squared off", "exit trade", "close trade", "book profit", "stop hit"]
+    if any(kw in user_msg.lower() for kw in close_kw):
+        # Let the AI handle this in conversation and guide through exit
+        pass
+
+    # ── AI response ──────────────────────────────────────
     try:
-        mood = detect_mood(user_message)
-        user_moods[user_id] = mood
-        mood_instruction = get_mood_instruction(mood)
-
-        prompt_map = {
-            "hostel": HOSTEL_PROMPT,
-            "freight": FREIGHT_PROMPT,
-            "trading": TRADING_PROMPT,
-            "personal": PERSONAL_PROMPT,
-        }
-        system_prompt = prompt_map.get(mode, PERSONAL_PROMPT) + mood_instruction
-
-        memory_facts = get_all_facts(user_id)
-        memory_summary = get_latest_summary(user_id)
-        if memory_facts or memory_summary:
-            memory_block = "\n\n[What I know about Harsheet:\n"
-            if memory_facts:
-                memory_block += memory_facts + "\n"
-            if memory_summary:
-                memory_block += "Recent context: " + memory_summary
-            memory_block += "]"
-            system_prompt += memory_block
+        facts   = get_all_facts(user_id)
+        summary = get_latest_summary(user_id)
+        system  = SYSTEM_PROMPT
+        if facts or summary:
+            system += "\n\n[Memory about Harsheet:\n"
+            if facts:
+                system += facts + "\n"
+            if summary:
+                system += f"Recent context: {summary}\n"
+            system += "]"
 
         history = get_recent_messages(user_id, limit=20)
-        append_message(user_id, "user", user_message)
-        history.append({"role": "user", "content": user_message})
+        append_message(user_id, "user", user_msg)
+        history.append({"role": "user", "content": user_msg})
 
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": system_prompt}] + history,
-            max_tokens=400,
-            temperature=0.75,
+            messages=[{"role": "system", "content": system}] + history,
+            max_tokens=500,
+            temperature=0.7,
         )
-        reply = response.choices[0].message.content.strip()
-
-        # Save assistant reply permanently
-        append_message(user_id, "assistant", reply)
-
-        # Auto-summarize + extract facts every 20 msgs
-        asyncio.create_task(asyncio.to_thread(maybe_summarize, user_id, client))
-
-        print("SARA [" + mode + "]: " + reply)
-        await send_reply(update, reply)
+        ai_reply = resp.choices[0].message.content.strip()
+        append_message(user_id, "assistant", ai_reply)
+        asyncio.create_task(asyncio.to_thread(maybe_summarize, user_id))
+        await reply(update, ai_reply)
 
     except groq_module.RateLimitError:
-        await send_reply(update, "Hitting rate limits right now. Give it a minute and try again.")
+        await reply(update, "Hitting rate limits. Give it a minute and try again.")
     except Exception as e:
-        print(f"Chat error: {e}")
-        await send_reply(update, "Something went wrong on my end. Try again.")
-
-
-# ============================================================
-# VOICE & IMAGES
-# ============================================================
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Voice messages are not supported yet. Please type it out.")
-
-
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caption = update.message.caption or "What is in this image? Describe it in detail."
-    await update.message.reply_text("Let me take a look...")
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    async with httpx.AsyncClient() as client_http:
-        image_bytes = (await client_http.get(file.file_path)).content
-        image_data = base64.b64encode(image_bytes).decode("utf-8")
-    response = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_data}},
-            {"type": "text", "text": "You are SARA, a smart and helpful personal assistant to Harsheet. Respond naturally and clearly. " + caption}
-        ]}]
-    )
-    await send_reply(update, response.choices[0].message.content)
-
+        print(f"[Chat] error: {e}")
+        await reply(update, "Something went wrong. Try again.")
 
 # ============================================================
 # STARTUP
@@ -808,7 +758,6 @@ async def post_init(application):
     asyncio.create_task(reminder_loop(application.bot))
     asyncio.create_task(daily_summary_loop(application.bot))
 
-
 app = (
     ApplicationBuilder()
     .token(TELEGRAM_TOKEN)
@@ -817,22 +766,16 @@ app = (
 )
 
 app.add_handler(CommandHandler("start",          cmd_start))
-app.add_handler(CommandHandler("personal",       cmd_personal))
-app.add_handler(CommandHandler("hostel",         cmd_hostel))
-app.add_handler(CommandHandler("freight",        cmd_freight))
-app.add_handler(CommandHandler("trading",        cmd_trading))
+app.add_handler(CommandHandler("trades",         cmd_trades))
+app.add_handler(CommandHandler("open",           cmd_open))
+app.add_handler(CommandHandler("pnl",            cmd_pnl))
+app.add_handler(CommandHandler("price",          cmd_price))
 app.add_handler(CommandHandler("reminders",      cmd_reminders))
 app.add_handler(CommandHandler("clearreminders", cmd_clearreminders))
-app.add_handler(CommandHandler("price",          cmd_price))
-app.add_handler(CommandHandler("goals",          cmd_goals))
-app.add_handler(CommandHandler("addgoal",        cmd_addgoal))
-app.add_handler(CommandHandler("donegoal",       cmd_donegoal))
 app.add_handler(CommandHandler("memory",         cmd_memory))
 app.add_handler(CommandHandler("clearmemory",    cmd_clearmemory))
 app.add_handler(CommandHandler("summary",        cmd_summary))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-app.add_handler(MessageHandler(filters.VOICE,    handle_voice))
-app.add_handler(MessageHandler(filters.PHOTO,    handle_image))
 
-print("SARA is running.")
+print("SARA trading bot is running.")
 app.run_polling()
